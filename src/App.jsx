@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
-import { Settings, Image as ImageIcon, Sparkles, Download, Loader2, Plus, X, AlertCircle, Video, LayoutTemplate, Wand2, History, Trash2 } from 'lucide-react';
+import { Settings, Image as ImageIcon, Sparkles, Download, Loader2, Plus, X, AlertCircle, Video, LayoutTemplate, Wand2, History, Trash2, Clock3, Check, Eye } from 'lucide-react';
 import { createTask, pollTaskStatus, checkConnection } from './services/nanoBananaApi';
 import { createVideoTask, pollVideoStatus } from './services/veoApi';
 import { uploadImageToHost } from './services/imgbbApi';
+import { generatePromptsWithGpt52 } from './services/gpt5Api';
 
 const DEFAULT_IMAGE_PROMPT = 'A highly detailed cinematic shot of the outfit in a neon-lit cyberpunk city street';
 const DEFAULT_VARIATION_PROMPTS = [
@@ -18,79 +19,13 @@ const FALLBACK_VARIATION_PROMPTS = [
   'Close-up fabric-detail emphasis while maintaining true color and material quality.',
   'Editorial movement pose with clear outfit readability and premium commercial finish.',
 ];
+const MAX_IMAGES = 14;
+const MAX_HISTORY_ITEMS = 50;
+const HISTORY_STORAGE_KEY = 'outfit_ai_generation_history_v1';
+const REROLL_PREFERRED_GUIDANCE = 'Use the first reference image as the preferred direction. Preserve outfit identity, styling language, and framing intent while creating fresh alternatives.';
 const API_KEY_STORAGE_KEY = 'outfit_ai_api_key_v1';
 
-const classifyBrightness = (brightnessValue) => {
-  if (brightnessValue < 85) return 'dramatic low-key';
-  if (brightnessValue < 140) return 'balanced studio';
-  return 'high-key clean';
-};
-
-const classifyColorMood = (r, g, b) => {
-  if (r > g + 18 && r > b + 18) return 'warm editorial tones';
-  if (b > r + 18 && b > g + 18) return 'cool polished tones';
-  if (g > r + 18 && g > b + 18) return 'fresh natural tones';
-  return 'neutral true-to-fabric tones';
-};
-
-const analyzeUploadedImage = async (imageUrl) => {
-  const image = await new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('Unable to analyze this image source.'));
-    img.src = imageUrl;
-  });
-
-  const sampleWidth = 64;
-  const sampleHeight = 64;
-  const canvas = document.createElement('canvas');
-  canvas.width = sampleWidth;
-  canvas.height = sampleHeight;
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  if (!context) throw new Error('Canvas context unavailable.');
-
-  context.drawImage(image, 0, 0, sampleWidth, sampleHeight);
-  const pixelData = context.getImageData(0, 0, sampleWidth, sampleHeight).data;
-
-  let red = 0;
-  let green = 0;
-  let blue = 0;
-  let alphaPixels = 0;
-  for (let i = 0; i < pixelData.length; i += 4) {
-    const alpha = pixelData[i + 3];
-    if (alpha < 5) continue;
-    red += pixelData[i];
-    green += pixelData[i + 1];
-    blue += pixelData[i + 2];
-    alphaPixels += 1;
-  }
-
-  if (alphaPixels === 0) {
-    throw new Error('Not enough visual data to analyze.');
-  }
-
-  red /= alphaPixels;
-  green /= alphaPixels;
-  blue /= alphaPixels;
-  const brightness = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-  const orientation = image.width >= image.height ? 'landscape' : 'portrait';
-
-  return {
-    brightness,
-    orientation,
-    colorMood: classifyColorMood(red, green, blue),
-    lightingStyle: classifyBrightness(brightness),
-  };
-};
-
-const buildPromptSuggestions = (analysis) => {
-  const basePromptSuggestion = `Premium e-commerce fashion capture of the same outfit, preserve exact garment design, fabric weave, color accuracy, and silhouette. Use ${analysis.lightingStyle} lighting with ${analysis.colorMood}, maintain a ${analysis.orientation} framing and clean professional styling.`;
-  const variationSuggestions = [...FALLBACK_VARIATION_PROMPTS];
-
-  return { basePromptSuggestion, variationSuggestions };
-};
-
+// (Removed old local canvas analyzer)
 function App() {
   const [apiKey, setApiKey] = useState(() => {
     try {
@@ -106,6 +41,7 @@ function App() {
   const [credits, setCredits] = useState(null);
 
   // App State
+  const [mainTab, setMainTab] = useState('home'); // 'home', 'history', 'settings'
   const [activeTab, setActiveTab] = useState('image'); // 'image' or 'video'
   const [mobileView, setMobileView] = useState('controls'); // 'controls' or 'preview'
 
@@ -116,9 +52,11 @@ function App() {
 
   const [prompt, setPrompt] = useState(DEFAULT_IMAGE_PROMPT);
   const [numOutputs, setNumOutputs] = useState(4);
-  const [posePrompts, setPosePrompts] = useState([...DEFAULT_VARIATION_PROMPTS]);
   const [resolution, setResolution] = useState('1K');
   const [aspectRatio, setAspectRatio] = useState('auto');
+  
+  // GPT-5.2 Analyzer State
+  const [isAnalyzingSuggestions, setIsAnalyzingSuggestions] = useState(false);
 
   // Video Gen State
   const [videoPrompt, setVideoPrompt] = useState('A cinematic slow-motion pan showcasing the stunning fabric textures, natural lighting');
@@ -132,21 +70,21 @@ function App() {
   const [taskState, setTaskState] = useState('');
   const [resultImages, setResultImages] = useState(null);
   const [selectedResult, setSelectedResult] = useState(null);
+  const [selectedResultIndices, setSelectedResultIndices] = useState(new Set());
+  const [preferredResultIndex, setPreferredResultIndex] = useState(null);
   const [error, setError] = useState(null);
   const [generationHistory, setGenerationHistory] = useState([]);
   const currentResultValid = activeTab === 'image' ? (resultImages && resultImages.length > 0) : videoResultUrl;
-  const [isAnalyzingSuggestions, setIsAnalyzingSuggestions] = useState(false);
-  const [suggestedBasePrompt, setSuggestedBasePrompt] = useState('');
-  const [suggestedVariationPrompts, setSuggestedVariationPrompts] = useState([]);
+  const [enlargedImage, setEnlargedImage] = useState(null);
 
   // Timer state
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [loadingBlendPercent, setLoadingBlendPercent] = useState(0);
+  const [loadingBlendIndex, setLoadingBlendIndex] = useState(0);
+  const [imageGenerationTimes, setImageGenerationTimes] = useState([]);
 
-  const MAX_IMAGES = 14;
-  const MAX_FILE_SIZE_MB = 10;
+  const MAX_FILE_SIZE_MB = 50;
   const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
-  const HISTORY_STORAGE_KEY = 'outfit_ai_history_v1';
-  const MAX_HISTORY_ITEMS = 40;
   const VIDEO_ASPECT_RATIOS = ['16:9', '9:16'];
   const generationControllerRef = useRef(null);
   const taskStateClearTimeoutRef = useRef(null);
@@ -157,6 +95,15 @@ function App() {
     if (typeof value !== 'number') return null;
     if (!Number.isFinite(value)) return null;
     return value;
+  };
+
+  const parseCreditValue = (value) => {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
   };
 
   const getResultImageUrl = (resultItem) => {
@@ -175,6 +122,7 @@ function App() {
     tokenUsed: toNumberOrNull(tokenUsed),
     tokenMode,
     promptUsed: typeof metadata?.promptUsed === 'string' ? metadata.promptUsed : '',
+    generationSeconds: toNumberOrNull(metadata?.generationSeconds),
     createdAt: new Date().toISOString(),
   });
 
@@ -183,10 +131,72 @@ function App() {
     return typeof resultItem.promptUsed === 'string' ? resultItem.promptUsed : '';
   };
 
+  const getResultImageGenerationSeconds = (resultItem) => {
+    if (!resultItem || typeof resultItem === 'string') return null;
+    return toNumberOrNull(resultItem.generationSeconds);
+  };
+
   const splitCostAcrossImages = (totalCost, count) => {
     if (!Number.isFinite(totalCost) || count <= 0) return Array(count).fill(null);
     const perImage = Number((totalCost / count).toFixed(2));
     return Array(count).fill(perImage);
+  };
+
+  const getPreferredResultItem = (sourceResults = resultImages, preferredIndex = preferredResultIndex) => {
+    if (!Array.isArray(sourceResults) || sourceResults.length === 0) return null;
+    if (!Number.isInteger(preferredIndex)) return null;
+    if (preferredIndex < 0 || preferredIndex >= sourceResults.length) return null;
+    return sourceResults[preferredIndex] || null;
+  };
+
+  const buildGenerationSourceImages = (preferredImageUrl = '') => {
+    if (!preferredImageUrl) return images;
+    const deduped = images.filter((img) => img.url !== preferredImageUrl);
+    return [{ id: buildId('preferred'), url: preferredImageUrl, isLocal: false }, ...deduped].slice(0, MAX_IMAGES);
+  };
+
+  const importImagesToVeoMode = (urls, successLabel = 'Image imported to Veo 3.1 mode.') => {
+    const safeUrls = Array.isArray(urls)
+      ? urls.map((url) => (typeof url === 'string' ? url.trim() : '')).filter(Boolean)
+      : [];
+
+    if (!safeUrls.length) {
+      setError('No image is available to import.');
+      return;
+    }
+
+    const existingUrls = new Set(images.map((img) => img.url));
+    const nextImages = [...images];
+    let added = 0;
+    let duplicates = 0;
+
+    for (const url of safeUrls) {
+      if (existingUrls.has(url)) {
+        duplicates += 1;
+        continue;
+      }
+      if (nextImages.length >= MAX_IMAGES) break;
+      nextImages.push({ id: Date.now() + Math.random() + added, url, isLocal: false });
+      existingUrls.add(url);
+      added += 1;
+    }
+
+    if (added === 0) {
+      if (nextImages.length >= MAX_IMAGES) {
+        setError(`Image limit reached (${MAX_IMAGES}). Remove one before importing to Veo 3.1.`);
+      } else {
+        setError('That image is already in your context list.');
+      }
+      return;
+    }
+
+    setImages(nextImages);
+    setActiveTab('video');
+    setMobileView('controls');
+    setVideoResultUrl(null);
+    setError(null);
+    setTaskState(duplicates > 0 ? `${successLabel} ${duplicates} duplicate image(s) were skipped.` : successLabel);
+    scheduleTaskStateReset(2400);
   };
 
   const getTokenCostLabel = (tokenCost, mode = 'estimated') => {
@@ -197,6 +207,8 @@ function App() {
     if (mode === 'estimated') return `-${formatted} tokens (est.)`;
     return `-${formatted} tokens`;
   };
+
+  const formatElapsedClock = (seconds) => `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
 
   const formatHistoryDate = (isoDate) => {
     try {
@@ -317,10 +329,48 @@ function App() {
   }, [isGenerating]);
 
   useEffect(() => {
+    if (!isGenerating || images.length === 0) {
+      setLoadingBlendPercent(0);
+      setLoadingBlendIndex(0);
+      return;
+    }
+
+    let isCancelled = false;
+    let blendPercent = 0;
+    let blendIndex = 0;
+    const tickMs = 120;
+    const stepPercent = 2;
+
+    setLoadingBlendPercent(0);
+    setLoadingBlendIndex(0);
+
+    const intervalId = setInterval(() => {
+      if (isCancelled) return;
+
+      blendPercent += stepPercent;
+      if (blendPercent > 100) blendPercent = 100;
+      setLoadingBlendPercent(blendPercent);
+
+      if (blendPercent >= 100) {
+        blendIndex = (blendIndex + 1) % images.length;
+        blendPercent = 0;
+        setLoadingBlendIndex(blendIndex);
+        setLoadingBlendPercent(0);
+      }
+    }, tickMs);
+
+    return () => {
+      isCancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [isGenerating, images.length]);
+
+  useEffect(() => {
     try {
       const normalizedApiKey = apiKey.trim();
       if (!normalizedApiKey) {
         localStorage.removeItem(API_KEY_STORAGE_KEY);
+        setConnectionStatus('idle');
         return;
       }
       localStorage.setItem(API_KEY_STORAGE_KEY, normalizedApiKey);
@@ -328,6 +378,28 @@ function App() {
       console.error('Failed to persist API key:', storageError);
     }
   }, [apiKey]);
+
+  // Auto-connect
+  useEffect(() => {
+    const key = apiKey.trim();
+    if (key && key.length > 10 && connectionStatus === 'idle' && !isTestingConnection) {
+      const timer = setTimeout(() => {
+        handleTestConnection();
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [apiKey, connectionStatus, isTestingConnection]);
+
+  // Real-time token tracking
+  useEffect(() => {
+    let intervalId;
+    if (apiKey && connectionStatus === 'success') {
+      intervalId = setInterval(() => {
+        refreshCredits(apiKey);
+      }, 5000); // Poll every 5 seconds for "real-time" tracking
+    }
+    return () => clearInterval(intervalId);
+  }, [apiKey, connectionStatus]);
 
   useEffect(() => {
     try {
@@ -342,75 +414,43 @@ function App() {
     }
   }, []);
 
-  useEffect(() => {
+  const handleAnalyzePrompt = async () => {
     if (images.length === 0) {
-      setSuggestedBasePrompt('');
-      setSuggestedVariationPrompts([]);
-      setIsAnalyzingSuggestions(false);
+      setError('Please upload at least one image before analyzing.');
       return;
     }
-
-    let isCancelled = false;
-    const primaryImageUrl = images[0]?.url;
-
-    const applySuggestions = (basePromptSuggestion, variationSuggestions) => {
-      if (isCancelled) return;
-
-      const safeVariations = Array.isArray(variationSuggestions) && variationSuggestions.length > 0
-        ? variationSuggestions.slice(0, 4)
-        : [...FALLBACK_VARIATION_PROMPTS];
-      const safeBasePrompt = typeof basePromptSuggestion === 'string' && basePromptSuggestion.trim()
-        ? basePromptSuggestion.trim()
-        : FALLBACK_SUGGESTED_BASE_PROMPT;
-
-      setSuggestedBasePrompt(safeBasePrompt);
-      setSuggestedVariationPrompts(safeVariations);
-      setPosePrompts((previousPrompts) => {
-        const nextPrompts = [...previousPrompts];
-        safeVariations.forEach((suggestion, index) => {
-          nextPrompts[index] = suggestion;
-        });
-        return nextPrompts;
-      });
-      setPrompt((previousPrompt) => {
-        const normalizedPrompt = (previousPrompt || '').trim();
-        const shouldUseSuggestedPrompt = !normalizedPrompt
-          || normalizedPrompt === DEFAULT_IMAGE_PROMPT
-          || normalizedPrompt === FALLBACK_SUGGESTED_BASE_PROMPT;
-        return shouldUseSuggestedPrompt ? safeBasePrompt : previousPrompt;
-      });
-    };
-
-    if (!primaryImageUrl) {
-      applySuggestions(FALLBACK_SUGGESTED_BASE_PROMPT, FALLBACK_VARIATION_PROMPTS);
+    
+    const key = apiKey.trim();
+    if (!key) {
+      setError('Please enter and sync your Kie.ai API key to use the AI Analyzer.');
       return;
     }
 
     setIsAnalyzingSuggestions(true);
+    let analysisFailed = false;
 
-    const runAnalysis = async () => {
-      try {
-        const analysis = await analyzeUploadedImage(primaryImageUrl);
-        if (isCancelled) return;
+    try {
+      const hostedImageUrls = await Promise.all(
+        images.map(async (img) => {
+          if (img.isLocal || img.url.startsWith('data:')) {
+            return await uploadImageToHost(img.url);
+          }
+          return img.url;
+        })
+      );
 
-        const suggestions = buildPromptSuggestions(analysis);
-        applySuggestions(suggestions.basePromptSuggestion, suggestions.variationSuggestions);
-      } catch (analysisError) {
-        console.error('Failed to analyze uploaded image for prompt suggestions:', analysisError);
-        applySuggestions(FALLBACK_SUGGESTED_BASE_PROMPT, FALLBACK_VARIATION_PROMPTS);
-      } finally {
-        if (!isCancelled) {
-          setIsAnalyzingSuggestions(false);
-        }
-      }
-    };
-
-    runAnalysis();
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [images]);
+      const result = await generatePromptsWithGpt52(key, hostedImageUrls, { requestTimeoutMs: 60000 });
+      setPrompt(result.basePrompt || FALLBACK_SUGGESTED_BASE_PROMPT);
+      setTaskState('GPT-5.2 successfully analyzed your images!');
+      scheduleTaskStateReset(3000);
+    } catch (analysisError) {
+      console.error('Failed to analyze uploaded images via GPT-5-2:', analysisError);
+      setError(analysisError.message || 'Analysis failed. Make sure your API key has GPT-5-2 access.');
+      analysisFailed = true;
+    } finally {
+      setIsAnalyzingSuggestions(false);
+    }
+  };
 
   const readFileAsDataUrl = (file) => {
     return new Promise((resolve, reject) => {
@@ -574,10 +614,23 @@ function App() {
     }
   };
 
-  const handleGenerate = async () => {
+  const handleGenerate = async (options = {}) => {
+    const rerollFromPreferred = Boolean(options?.rerollFromPreferred);
+    const preferredItem = rerollFromPreferred ? getPreferredResultItem() : null;
+    const preferredImageUrl = preferredItem ? getResultImageUrl(preferredItem) : '';
+
+    if (rerollFromPreferred && !preferredImageUrl) {
+      setError('Choose a preferred layout before rerolling.');
+      return;
+    }
+
+    const sourceImages = buildGenerationSourceImages(preferredImageUrl);
+
     setError(null);
     setResultImages(null);
     setSelectedResult(null);
+    setPreferredResultIndex(null);
+    setImageGenerationTimes([]);
     clearPendingTaskStateReset();
 
     const key = apiKey.trim();
@@ -586,7 +639,7 @@ function App() {
       return;
     }
 
-    if (images.length === 0) {
+    if (sourceImages.length === 0) {
       setError('Please provide at least one source image.');
       return;
     }
@@ -598,7 +651,7 @@ function App() {
 
     try {
       setIsGenerating(true);
-      setTaskState('Preparing images...');
+      setTaskState(rerollFromPreferred ? 'Rerolling from your preferred layout...' : 'Preparing images...');
 
       if (creditsBefore === null) {
         try {
@@ -610,7 +663,7 @@ function App() {
       }
 
       const imageUrls = [];
-      for (const img of images) {
+      for (const img of sourceImages) {
         if (img.isLocal || img.url.startsWith('data:')) {
           setTaskState('Uploading local image to secure host...');
           const remoteUrl = await uploadImageToHost(img.url, { signal: controller.signal });
@@ -620,15 +673,18 @@ function App() {
         }
       }
 
-      setTaskState(`Initiating ${numOutputs} parallel AI synthesis tasks...`);
+      setTaskState(rerollFromPreferred
+        ? `Initiating ${numOutputs} reroll tasks from preferred layout...`
+        : `Initiating ${numOutputs} parallel AI synthesis tasks...`);
+      setImageGenerationTimes(Array.from({ length: numOutputs }, () => ({ seconds: null, done: false })));
 
       const basePrompt = (prompt || '').trim() || DEFAULT_IMAGE_PROMPT;
-      const activePoses = posePrompts
-        .slice(0, numOutputs)
-        .map((pose, index) => (typeof pose === 'string' && pose.trim()
-          ? pose.trim()
-          : `Variation ${index + 1}: maintain outfit details and quality.`));
-      const fullPrompts = activePoses.map((pose) => `${basePrompt}. ${pose}`);
+      const fullPrompts = Array.from({ length: numOutputs }).map(() => {
+        const sections = rerollFromPreferred
+          ? [basePrompt, REROLL_PREFERRED_GUIDANCE]
+          : [basePrompt];
+        return sections.filter(Boolean).join('. ');
+      });
 
       const taskIds = await Promise.all(
         fullPrompts.map((fullPrompt) =>
@@ -641,15 +697,26 @@ function App() {
       setTaskState('Tasks created. Waiting for AI generation (this may take a minute)...');
 
       let completedTasks = 0;
+      const generationStartedAt = Date.now();
 
       const finalImages = await Promise.all(
-        taskIds.map(async (taskId) => {
-          const result = await pollTaskStatus(key, taskId, null, {
+        taskIds.map(async (taskId, index) => {
+          const imageUrl = await pollTaskStatus(key, taskId, null, {
             signal: controller.signal,
+          });
+          const seconds = Math.max(1, Math.round((Date.now() - generationStartedAt) / 1000));
+          setImageGenerationTimes((previous) => {
+            if (!Array.isArray(previous) || previous.length === 0) return previous;
+            const next = [...previous];
+            next[index] = { seconds, done: true };
+            return next;
           });
           completedTasks += 1;
           setTaskState(`Generation progress: ${completedTasks}/${numOutputs} complete...`);
-          return result;
+          return {
+            imageUrl,
+            generationSeconds: seconds,
+          };
         })
       );
 
@@ -658,9 +725,10 @@ function App() {
         ? Math.max(0, Number((creditsBefore - creditsAfter).toFixed(2)))
         : null;
       const costSplit = splitCostAcrossImages(totalTokenUsed, finalImages.length);
-      const enrichedResults = finalImages.map((url, index) =>
-        createResultImage(url, costSplit[index], 'estimated', {
+      const enrichedResults = finalImages.map((resultItem, index) =>
+        createResultImage(resultItem.imageUrl, costSplit[index], 'estimated', {
           promptUsed: fullPrompts[index] || basePrompt,
+          generationSeconds: resultItem.generationSeconds,
         })
       );
 
@@ -672,15 +740,18 @@ function App() {
         id: buildId('hist'),
         createdAt: new Date().toISOString(),
         prompt: basePrompt,
-        sourceCount: images.length,
+        sourceCount: sourceImages.length,
         resolution,
         aspectRatio,
         totalTokenUsed,
         costMode: Number.isFinite(totalTokenUsed) ? 'estimated' : 'unknown',
         outputs: enrichedResults,
+        generationMode: rerollFromPreferred ? 'reroll' : 'fresh',
+        preferredSourceUrl: preferredImageUrl || null,
       });
     } catch (err) {
       generationFailed = true;
+      setImageGenerationTimes([]);
       setError(isAbortError(err) ? 'Generation cancelled.' : (err.message || 'An error occurred during generation.'));
     } finally {
       finalizeGeneration(controller);
@@ -692,6 +763,7 @@ function App() {
 
   const handleVideoGenerate = async () => {
     clearPendingTaskStateReset();
+    setImageGenerationTimes([]);
     const key = apiKey.trim();
     if (!key) {
       setError('Please enter your kie.ai API key to begin.');
@@ -775,6 +847,7 @@ function App() {
 
   const handleEnhanceTo4K = async (imageUrl) => {
     const key = apiKey.trim();
+    setImageGenerationTimes([]);
     if (!key) {
       setError('Please enter your kie.ai API key to begin.');
       return;
@@ -848,11 +921,14 @@ function App() {
   };
 
   const handleRegenerateFromVariant = (imageUrl) => {
-    // Take this specific image, wipe the current inputs, and set it as the new primary image
-    setImages([{ id: Date.now(), url: imageUrl, isLocal: false }]);
+    // Append this specific image to the upload queue as a new base image
+    setImages((prev) => {
+      if (prev.length >= MAX_IMAGES) return prev;
+      return [...prev, { id: Date.now(), url: imageUrl, isLocal: false }];
+    });
     setResultImages(null);
     setSelectedResult(null);
-    setPrompt('Refine this variation: ');
+    setPreferredResultIndex(null);
     setMobileView('controls');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -868,6 +944,7 @@ function App() {
         if (!url) return null;
         return createResultImage(url, getResultImageCost(item), item?.tokenMode || entry?.costMode || 'unknown', {
           promptUsed: promptUsed || entry?.prompt || '',
+          generationSeconds: getResultImageGenerationSeconds(item),
         });
       })
       .filter(Boolean);
@@ -877,6 +954,7 @@ function App() {
     setActiveTab('image');
     setVideoResultUrl(null);
     setSelectedResult(null);
+    setPreferredResultIndex(null);
     setResultImages(hydrated);
     if (typeof entry?.prompt === 'string' && entry.prompt.trim()) {
       setPrompt(entry.prompt);
@@ -884,24 +962,101 @@ function App() {
     setMobileView('preview');
   };
 
+  const handleSetPreferredResult = (index) => {
+    if (!Array.isArray(resultImages) || index < 0 || index >= resultImages.length) return;
+    setPreferredResultIndex(index);
+    setError(null);
+    setTaskState(`Preferred layout set to Result ${index + 1}.`);
+    scheduleTaskStateReset(2000);
+  };
+
+  const handleRerollFromPreferred = () => {
+    if (!Number.isInteger(preferredResultIndex)) {
+      setError('Select a preferred layout first, then reroll.');
+      return;
+    }
+    handleGenerate({ rerollFromPreferred: true });
+  };
+
+  const handleImportSelectedResultToVeo = (resultItem) => {
+    const imageUrl = getResultImageUrl(resultItem);
+    if (!imageUrl) {
+      setError('Unable to import this result because no image URL was found.');
+      return;
+    }
+    importImagesToVeoMode([imageUrl], 'Image imported to Veo 3.1 mode.');
+  };
+
+  const handleImportPreferredToVeo = () => {
+    const preferredItem = getPreferredResultItem();
+    if (!preferredItem) {
+      setError('Select a preferred layout before importing to Veo 3.1.');
+      return;
+    }
+    handleImportSelectedResultToVeo(preferredItem);
+  };
+
+  const hasLoadingBlendImages = images.length > 0;
+  const loadingCurrentImageUrl = hasLoadingBlendImages
+    ? images[loadingBlendIndex % images.length]?.url
+    : '';
+  const loadingBlendRatio = Math.min(Math.max(loadingBlendPercent / 100, 0), 1);
+  const loadingOutputCount = activeTab === 'image'
+    ? Math.max(1, imageGenerationTimes.length || numOutputs)
+    : 0;
+  const loadingImageCards = activeTab === 'image'
+    ? Array.from({ length: loadingOutputCount }, (_, index) => {
+      const sourceImage = images[index % images.length];
+      const timing = imageGenerationTimes[index];
+      const done = Boolean(timing?.done);
+      const seconds = done && Number.isFinite(timing?.seconds) ? timing.seconds : elapsedSeconds;
+      return {
+        id: `loading-card-${index}`,
+        index,
+        imageUrl: sourceImage?.url || loadingCurrentImageUrl || '',
+        done,
+        seconds: Math.max(0, seconds),
+      };
+    })
+    : [];
+  const normalizedCredits = parseCreditValue(credits);
+  const hasLowBalance = normalizedCredits !== null && normalizedCredits <= 0;
+  const hasConnectionError = connectionStatus === 'error';
+  const hasPreferredResult = Number.isInteger(preferredResultIndex)
+    && Array.isArray(resultImages)
+    && preferredResultIndex >= 0
+    && preferredResultIndex < resultImages.length;
+  const selectedResultItem = Number.isInteger(selectedResult)
+    && Array.isArray(resultImages)
+    && selectedResult >= 0
+    && selectedResult < resultImages.length
+    ? resultImages[selectedResult]
+    : null;
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans selection:bg-[#0A2342]/20 pb-24 lg:pb-0">
+    <div className="mejin-app min-h-screen font-sans pb-28" style={{background:'var(--bg-base)'}}>
       {/* Header */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-50 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-6 h-6 text-[#0A2342]" />
-            <h1 className="font-bold text-base sm:text-xl tracking-tight text-slate-900">Outfit<span className="text-[#0A2342]">AI</span> Studio</h1>
+      <header className="mejin-header">
+        <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="mejin-logo-badge" aria-hidden="true">
+              <span className="mejin-logo-glyph">M</span>
+            </div>
+            <div className="mejin-wordmark" role="img" aria-label="Mejin">
+              <span className="mejin-wordmark-title">Mejin</span>
+              <span className="mejin-wordmark-subtitle" style={{ color: 'var(--mejin-text-soft)' }}>Image Craft Studio</span>
+            </div>
           </div>
 
           <div className="flex items-center gap-2 sm:gap-4 text-sm font-medium">
-            <div className="bg-slate-100 rounded-full p-1 flex items-center border border-slate-200 shadow-inner">
+            <div className="mejin-segment-shell rounded-full p-1 flex items-center">
               <button
                 onClick={() => {
                   setActiveTab('image');
+                  setMainTab('home');
                   setMobileView('controls');
                 }}
-                className={`px-3 sm:px-6 py-2.5 rounded-full transition-all flex items-center gap-1.5 sm:gap-2 font-medium text-xs sm:text-sm ${activeTab === 'image' ? 'bg-[#0A2342] text-white shadow-md' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/50'}`}
+                className={`mejin-segment-btn px-3 sm:px-6 py-2.5 rounded-full transition-all flex items-center gap-1.5 sm:gap-2 font-medium text-xs sm:text-sm ${activeTab === 'image' ? 'mejin-segment-btn--active' : 'mejin-segment-btn--idle'}`}
               >
                 <ImageIcon className="w-4 h-4" />
                 <span className="hidden sm:inline">Outfit Image</span>
@@ -910,9 +1065,10 @@ function App() {
               <button
                 onClick={() => {
                   setActiveTab('video');
+                  setMainTab('home');
                   setMobileView('controls');
                 }}
-                className={`px-3 sm:px-6 py-2.5 rounded-full transition-all flex items-center gap-1.5 sm:gap-2 font-medium text-xs sm:text-sm ${activeTab === 'video' ? 'bg-[#0A2342] text-white shadow-md' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/50'}`}
+                className={`mejin-segment-btn px-3 sm:px-6 py-2.5 rounded-full transition-all flex items-center gap-1.5 sm:gap-2 font-medium text-xs sm:text-sm ${activeTab === 'video' ? 'mejin-segment-btn--active' : 'mejin-segment-btn--idle'}`}
               >
                 <Video className="w-4 h-4" />
                 <span className="hidden sm:inline">Veo 3.1 Video</span>
@@ -922,105 +1078,63 @@ function App() {
           </div>
         </div>
       </header>
+      <main className="w-full max-w-xl mx-auto px-4 pt-6 pb-32 flex flex-col gap-4">
 
-      <main className="max-w-[90rem] mx-auto px-4 sm:px-6 py-4 sm:py-8 grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-8 items-start">
-
-        <div className={`${mobileView === 'controls' ? 'block' : 'hidden'} lg:block lg:col-span-5 xl:col-span-4 space-y-4 sm:space-y-6 lg:sticky lg:top-24 lg:max-h-[calc(100vh-8rem)] lg:overflow-y-auto no-scrollbar pb-2 lg:pb-12 lg:pr-2`}>
-
-          {/* API Connection Panel */}
-          <div className="p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] bg-white border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.04)] space-y-4">
-            <div className="flex justify-between items-center mb-2">
-              <div className="flex items-center gap-2 text-[#0A2342]">
-                <Settings className="w-5 h-5" />
-                <h2 className="font-semibold text-slate-800">Connection</h2>
+        {mainTab === 'home' && (
+          <div className="w-full flex flex-col gap-4">
+            {/* Hero */}
+            <div className="text-center pt-2 pb-1">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full mb-3" style={{background:'var(--primary-soft)',border:'1px solid rgba(37,99,235,0.15)'}}>
+                <Sparkles className="w-3 h-3" style={{color:'var(--primary)'}} />
+                <span className="text-xs font-700" style={{color:'var(--primary)',fontWeight:700}}>AI-Powered Generation</span>
               </div>
-              <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-full border border-slate-200 shadow-sm">
-                <div className={`w-2 h-2 rounded-full transition-all duration-500 ${connectionStatus === 'success' ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' : connectionStatus === 'error' ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]' : 'bg-slate-300'}`} />
-                <span className={`text-[10px] font-bold uppercase tracking-wider transition-colors ${connectionStatus === 'success' ? 'text-green-600' : connectionStatus === 'error' ? 'text-red-500' : 'text-slate-400'}`}>
-                  {connectionStatus === 'success' ? 'Secure' : connectionStatus === 'error' ? 'Error' : 'Offline'}
-                </span>
-              </div>
+              <h1 className="font-serif font-black tracking-tight leading-tight mb-2" style={{fontFamily:'Outfit,Inter,sans-serif',fontSize:'clamp(1.75rem,6vw,2.5rem)',color:'var(--text)'}}>
+                Image Craft <span className="gradient-text">Studio</span>
+              </h1>
+              <p className="text-sm mx-auto max-w-xs" style={{color:'var(--text-secondary)'}}>
+                Upload photos · Write a prompt · Generate stunning AI images
+              </p>
             </div>
 
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Kie.ai Access Token</label>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => {
-                    setApiKey(e.target.value);
-                    setConnectionStatus('idle');
-                    setConnectionMessage('');
-                    setCredits(null);
-                  }}
-                  placeholder="Paste Bearer Token..."
-                  className="flex-1 bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 text-base focus:outline-none focus:border-[#0A2342] focus:ring-1 focus:ring-[#0A2342] transition-all placeholder:text-slate-400 text-slate-800"
-                />
+          {/* Video type info banners */}
+          {activeTab === 'video' && videoGenerationType === 'img2vid' && (
+            <div className="mejin-alert mejin-alert--info">
+              <Video className="w-4 h-4 mt-0.5 shrink-0" />
+              <span><strong>Image-to-Video:</strong> Requires 1 image (start frame) or 2 images (start &amp; end frames).</span>
+            </div>
+          )}
+          {activeTab === 'video' && videoGenerationType === 'ref2vid' && (
+            <div className="mejin-alert mejin-alert--info">
+              <Video className="w-4 h-4 mt-0.5 shrink-0" />
+              <span><strong>Reference-to-Video:</strong> Requires exactly 3 reference images.</span>
+            </div>
+          )}
+          {activeTab === 'video' && Array.isArray(resultImages) && resultImages.length > 0 && (
+            <div className="mejin-alert mejin-alert--info" style={{justifyContent:'space-between'}}>
+              <span style={{fontSize:'0.8125rem'}}>Have generated layouts? Import your preferred one into Veo 3.1.</span>
                 <button
-                  onClick={handleTestConnection}
-                  disabled={isTestingConnection || !apiKey}
-                  className={`px-6 py-4 rounded-2xl font-bold flex items-center justify-center w-full sm:w-auto sm:min-w-[100px] gap-2 transition-all ${isTestingConnection || !apiKey ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-[#0A2342] hover:bg-[#15345d] text-white shadow-md active:scale-95'}`}
+                  onClick={handleImportPreferredToVeo}
+                  disabled={!hasPreferredResult}
+                  className="px-3 py-1.5 rounded-full font-bold disabled:opacity-40 disabled:cursor-not-allowed" style={{background:'rgba(79,139,255,0.15)',border:'1px solid rgba(79,139,255,0.3)',color:'#93c5fd'}}
                 >
-                  {isTestingConnection ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Sync'}
+                  Import Preferred
                 </button>
               </div>
-            </div>
-
-            {connectionStatus === 'success' && credits !== null && (
-              <div className="mt-4 bg-emerald-50 border border-emerald-100 rounded-2xl p-4 flex justify-between items-center text-sm transition-all duration-300">
-                <div className="flex items-center gap-2 text-emerald-800">
-                  <Sparkles className="w-4 h-4" />
-                  <span className="font-semibold">Credits Available</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="font-bold text-emerald-700 text-lg tracking-tight">
-                    {credits}
-                  </span>
-                </div>
-              </div>
             )}
 
-            {connectionStatus === 'error' && (
-              <div className="mt-4 bg-rose-50 border border-rose-100 rounded-2xl p-4 flex items-start flex-col gap-1 text-sm text-rose-600 transition-all duration-300">
-                <div className="flex items-center gap-2 font-bold">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  <span>Connection Failed</span>
-                </div>
-                <span className="text-xs text-rose-500 ml-6 break-words w-full font-medium">{connectionMessage}</span>
-              </div>
-            )}
-          </div>
-
-          {/* Input Panel */}
-          <div className="p-4 sm:p-6 rounded-[1.5rem] sm:rounded-[2rem] bg-white border border-slate-100 shadow-[0_8px_30px_rgb(0,0,0,0.04)] space-y-5 sm:space-y-6">
-            <div className="flex justify-between items-center mb-2">
-              <h2 className="font-semibold text-lg text-slate-800">Generation Settings</h2>
-              <span className="text-xs bg-slate-100 px-3 py-1 rounded-full text-slate-500 font-bold border border-slate-200">
-                {images.length} / {MAX_IMAGES} Configured
-              </span>
-            </div>
-
-            {/* Contextual Warning based on Tab */}
-            {activeTab === 'video' && videoGenerationType === 'img2vid' && (
-              <div className="text-xs text-sky-700 bg-sky-50 p-3 rounded-2xl border border-sky-100 mb-4 font-medium">
-                <strong>Image-to-Video:</strong> Requires exactly 1 image (starting phrase) or 2 images (start and end frames).
-              </div>
-            )}
-            {activeTab === 'video' && videoGenerationType === 'ref2vid' && (
-              <div className="text-xs text-sky-700 bg-sky-50 p-3 rounded-2xl border border-sky-100 mb-4 font-medium">
-                <strong>Reference-to-Video:</strong> Requires exactly 3 reference images.
-              </div>
-            )}
-
+          {/* Main Upload Card */}
+          <div className="mejin-panel p-5 flex flex-col gap-5">
             {/* Image Sources */}
-            <div className="space-y-4">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Context Models</label>
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between">
+                <span className="section-label">Upload Images</span>
+                <span className="mejin-badge mejin-badge--blue">{images.length} / {MAX_IMAGES}</span>
+              </div>
 
-              <div className="flex flex-col sm:flex-row gap-2">
+              <div className="flex gap-2">
                 <div className="relative flex-1">
-                  <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                    <ImageIcon className="h-4 w-4 text-slate-400" />
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                    <ImageIcon className="h-4 w-4" style={{color:'var(--text-muted)'}} />
                   </div>
                   <input
                     type="text"
@@ -1028,686 +1142,824 @@ function App() {
                     onChange={(e) => setUrlInput(e.target.value)}
                     onPaste={handleUrlInputPaste}
                     onKeyDown={(e) => e.key === 'Enter' && handleAddUrl()}
-                    placeholder="Paste image URL here..."
-                    className="w-full bg-slate-50 border border-slate-200 rounded-2xl pl-11 pr-4 py-4 text-base focus:outline-none focus:border-[#0A2342] focus:ring-1 focus:ring-[#0A2342] transition-all placeholder:text-slate-400 text-slate-800"
+                    placeholder="Paste image URL…"
+                    className="mejin-input w-full pl-9 pr-3 py-3 text-sm"
                   />
                 </div>
                 <button
-                  onClick={handleAddUrl}
+                  onClick={() => { if (urlInput.trim()) { handleAddUrl(); } else { fileInputRef.current?.click(); } }}
                   disabled={images.length >= MAX_IMAGES}
-                  className="bg-[#0A2342] text-white hover:bg-[#15345d] disabled:opacity-50 disabled:cursor-not-allowed px-6 py-4 rounded-2xl font-bold transition-all shadow-md active:scale-95 w-full sm:w-auto"
+                  className="mejin-btn-primary rounded-xl flex items-center justify-center"
+                  style={{ width: '48px', height: '48px', flexShrink: 0 }}
+                  aria-label="Add image"
                 >
-                  Add
+                  <Plus className="w-5 h-5" />
                 </button>
               </div>
-              <p className="text-[11px] text-slate-500">
-                Tip: copy an image (Snipping Tool, screenshot, browser) and paste it into the URL field.
-              </p>
+              <p className="text-xs" style={{color:'var(--text-muted)'}}>Tip: paste (Ctrl+V) a screenshot directly, or click + to browse files.</p>
 
-              <div className="relative">
-                <input
-                  type="file"
-                  multiple
-                  accept="image/*"
-                  className="hidden"
-                  ref={fileInputRef}
-                  onChange={handleFileUpload}
-                  disabled={images.length >= MAX_IMAGES}
-                />
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={images.length >= MAX_IMAGES}
-                  className="w-full border-2 border-dashed border-slate-200 hover:border-[#0A2342]/50 bg-slate-50/50 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed rounded-[1.5rem] py-8 flex flex-col items-center justify-center gap-3 transition-all text-slate-500 hover:text-[#0A2342]"
-                >
-                  <Plus className="w-6 h-6" />
-                  <span className="text-sm font-semibold">Upload from Device</span>
-                </button>
-              </div>
+              <input
+                type="file"
+                multiple
+                accept="image/*"
+                className="hidden"
+                ref={fileInputRef}
+                onChange={handleFileUpload}
+                disabled={images.length >= MAX_IMAGES}
+              />
 
               {/* Thumbnails grid */}
               {images.length > 0 && (
-                <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-2 max-h-56 overflow-y-auto">
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <div className="grid grid-cols-3 gap-2 mt-1">
                   {images.map((img) => (
-                      <div key={img.id} className="relative group rounded-xl border border-slate-200 bg-white shadow-sm p-1.5 min-h-24 flex items-center justify-center">
-                        <img src={img.url} alt="Upload preview" className="w-full h-24 object-contain rounded-lg bg-slate-50" />
-                      <button
-                        onClick={() => removeImage(img.id)}
-                          className="absolute top-1.5 right-1.5 bg-black/50 hover:bg-rose-500 text-white rounded-full p-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all backdrop-blur-sm"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
+                    <div
+                      key={img.id}
+                      className="relative group rounded-xl overflow-hidden cursor-pointer card-lift"
+                      style={{aspectRatio:'1',background:'var(--bg-base)',border:'1.5px solid var(--border)'}}
+                      onClick={() => setEnlargedImage(img.url)}
+                    >
+                      <img src={img.url} alt="Upload preview" className="w-full h-full object-cover" />
+                      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity" style={{background:'rgba(15,23,42,0.45)'}}>
+                        <Eye className="w-5 h-5 text-white" />
                       </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); removeImage(img.id); }}
+                        className="absolute top-1.5 right-1.5 rounded-full p-1 flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
+                        style={{background:'var(--danger)',minWidth:'22px',minHeight:'22px'}}
+                        aria-label="Remove image"
+                      >
+                        <X className="w-3 h-3 text-white" />
+                      </button>
+                    </div>
                   ))}
-                  </div>
                 </div>
               )}
             </div>
+          </div>
+          {/* Prompt & Config card is further below */}
 
-            {/* Generation Output Configuration - Conditional on Tab */}
-            {activeTab === 'image' ? (
-              <>
-                {/* Prompt */}
-                <div className="space-y-2 pt-2 text-left">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Setting & Context</label>
-                  <textarea
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    rows={2}
-                    placeholder="Describe the new setting for your outfit..."
-                    className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 text-base focus:outline-none focus:border-[#0A2342] focus:ring-1 focus:ring-[#0A2342] transition-all placeholder:text-slate-400 text-slate-800 resize-none shadow-sm"
-                  />
-                </div>
-                <div className="rounded-2xl border border-slate-200 bg-slate-50/90 p-3 sm:p-4 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 text-slate-700">
-                      <Wand2 className="w-4 h-4 text-sky-600" />
-                      <span className="text-xs font-bold uppercase tracking-wider">Suggested Prompt Stack</span>
-                    </div>
-                    {isAnalyzingSuggestions && (
-                      <span className="text-[11px] text-sky-600 font-semibold flex items-center gap-1">
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        Analyzing
-                      </span>
-                    )}
-                  </div>
+          {/* Home Tab: Results Area */}
+        {mainTab === 'home' && (isGenerating || currentResultValid) && (
+          <div className="flex flex-col w-full max-w-xl mx-auto mt-4 px-2" style={{height:'80vh',maxHeight:'820px'}}>
+            <div className="mejin-stage relative flex-1 rounded-[1.5rem] sm:rounded-[2.5rem] flex items-start justify-center p-2 sm:p-4 overflow-hidden">
 
-                  {suggestedBasePrompt ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => setPrompt(suggestedBasePrompt)}
-                        className="text-xs px-3 py-1.5 rounded-full border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 font-semibold"
-                      >
-                        Use Suggested Base Prompt
-                      </button>
-                      <pre className="text-xs leading-relaxed text-slate-700 font-mono bg-white border border-slate-200 rounded-xl p-3 overflow-x-auto whitespace-pre-wrap break-words">
-                        {suggestedBasePrompt}
-                      </pre>
-                    </>
-                  ) : (
-                    <p className="text-xs text-slate-500">
-                      Upload at least one image to auto-generate quality-preserving prompt suggestions.
-                    </p>
-                  )}
-                </div>
 
-                {/* Number of Outputs & Tweaks */}
-                <div className="space-y-3 pt-4 border-t border-slate-100">
-                  <div className="flex justify-between items-center mb-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Output Variations</label>
-                    <div className="flex bg-slate-100 rounded-full p-1 border border-slate-200 shadow-inner">
-                      <button
-                        onClick={() => setNumOutputs(2)}
-                        className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${numOutputs === 2 ? 'bg-white text-[#0A2342] shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
-                      >
-                        2 Layouts
-                      </button>
-                      <button
-                        onClick={() => setNumOutputs(4)}
-                        className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${numOutputs === 4 ? 'bg-white text-[#0A2342] shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
-                      >
-                        4 Layouts
-                      </button>
-                    </div>
-                  </div>
-                  {suggestedVariationPrompts.length > 0 && (
-                    <div className="rounded-xl border border-sky-100 bg-sky-50 px-3 py-2 text-[11px] text-sky-700 font-medium">
-                      Variation prompts are auto-suggested from your uploaded image and still fully editable below.
-                    </div>
+
+              {isGenerating && (
+                <div className="absolute inset-0 z-30 flex items-center justify-center backdrop-blur-xl transition-opacity duration-700" style={{background:'rgba(6,8,17,0.8)'}}>
+                  {hasLoadingBlendImages && (
+                    <div
+                      className="absolute inset-0 opacity-55"
+                      style={{
+                        backgroundImage: `url(${loadingCurrentImageUrl || images[0]?.url || ''})`,
+                        backgroundSize: 'cover',
+                        backgroundPosition: 'center',
+                        filter: 'blur(44px) saturate(0.7)',
+                        transform: `scale(${1.08 + loadingBlendRatio * 0.06})`,
+                        transition: 'transform 320ms ease-out',
+                      }}
+                    />
                   )}
 
-                  {/* Distinct Pose Prompts */}
-                  <div className="space-y-3 mt-2">
-                    {Array.from({ length: numOutputs }).map((_, i) => (
-                      <div key={i} className="flex flex-col gap-1 relative">
-                        <span className="absolute left-4 top-3 text-[10px] font-bold text-sky-600 uppercase tracking-wider bg-slate-50 shadow-sm border border-slate-200 rounded-full px-2 py-0.5 z-10">Result {i + 1}</span>
-                        <input
-                          type="text"
-                          value={posePrompts[i]}
-                          onChange={(e) => {
-                            const newPrompts = [...posePrompts];
-                            newPrompts[i] = e.target.value;
-                            setPosePrompts(newPrompts);
-                          }}
-                          placeholder={`Enter specific tweak...`}
-                          className="w-full bg-slate-50 border border-slate-200 rounded-2xl pl-[80px] pr-5 py-4 text-base focus:outline-none focus:border-[#0A2342] transition-all placeholder:text-slate-400 text-slate-700 shadow-sm"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                  <div className="relative z-40 w-full max-w-5xl px-4">
+                    <div className="mejin-loading-shell rounded-[2rem] p-4 sm:p-6 md:p-7">
+                      {activeTab === 'image' && loadingImageCards.length > 0 ? (
+                        <>
+                          <div className={`grid ${loadingOutputCount <= 2 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1 sm:grid-cols-2'} gap-3 sm:gap-4`}>
+                            {loadingImageCards.map((card) => (
+                              <article
+                                key={card.id}
+                                className={`relative overflow-hidden rounded-2xl border min-h-44 sm:min-h-52 ${card.done ? 'border-blue-300' : 'border-slate-200'}`}
+                              >
+                                {card.imageUrl ? (
+                                  <img
+                                    src={card.imageUrl}
+                                    alt={`Generating image ${card.index + 1}`}
+                                    className={`absolute inset-0 w-full h-full object-cover transition-all duration-700 ${card.done ? 'blur-none scale-100 saturate-100 opacity-100 cursor-pointer z-50' : 'blur-[8px] scale-110 saturate-[0.85] mejin-loading-drift opacity-60'}`}
+                                    style={{ animationDelay: `${card.index * 280}ms` }}
+                                    onClick={() => card.done && setEnlargedImage(card.imageUrl)}
+                                  />
+                                ) : (
+                                  <div className="absolute inset-0 bg-blue-50/50" />
+                                )}
+                                <div className={`absolute inset-0 bg-gradient-to-t from-white/90 via-white/50 to-transparent ${card.done ? 'opacity-0' : 'opacity-100'}`} />
+                                <div className={`absolute inset-0 blend-sweep pointer-events-none opacity-40 ${card.done ? 'hidden' : 'block'}`} />
 
-                {/* Resolution & Aspect Ratio */}
-                <div className="grid grid-cols-2 gap-6 pt-4 border-t border-slate-100">
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Resolution</label>
-                    <div className="grid grid-cols-3 gap-2">
-                      {['1K', '2K', '4K'].map((res) => (
-                        <button
-                          key={res}
-                          onClick={() => setResolution(res)}
-                          className={`py-3 md:py-2.5 rounded-xl text-[13px] font-bold transition-all border ${resolution === res ? 'bg-sky-50 border-sky-200 text-sky-700 shadow-sm' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}
-                        >
-                          {res}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Aspect Ratio</label>
-                    <div className="grid grid-cols-3 gap-2">
-                      {['auto', '1:1', '4:3', '3:4', '16:9', '9:16'].map((ratio) => (
-                        <button
-                          key={ratio}
-                          onClick={() => setAspectRatio(ratio)}
-                          className={`py-3 md:py-2 px-1 rounded-xl text-xs font-bold transition-all border ${aspectRatio === ratio ? 'bg-sky-50 border-sky-200 text-sky-700 shadow-sm' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}
-                        >
-                          {ratio}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Generate Button */}
-                <button
-                  onClick={handleGenerate}
-                  disabled={isGenerating || images.length === 0}
-                  className={`w-full py-5 rounded-2xl font-black text-lg flex items-center justify-center gap-2 transition-all shadow-[0_4px_14px_0_rgba(10,35,66,0.39)] hover:shadow-[0_6px_20px_rgba(10,35,66,0.23)] hover:bg-[#15345d] ${isGenerating || images.length === 0 ? 'bg-[#0A2342]/50 cursor-not-allowed shadow-none hover:shadow-none' : 'bg-[#0A2342] text-white active:scale-[0.98]'}`}
-                >
-                  {isGenerating ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Designing Masterpiece...
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="w-5 h-5" />
-                      Generate Masterpiece
-                    </>
-                  )}
-                </button>
-              </>
-            ) : (
-              <>
-                {/* Type */}
-                <div className="space-y-2 pt-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Generation Type</label>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      onClick={() => { setVideoGenerationType('img2vid'); setVideoModel('veo3'); }}
-                      className={`py-4 md:py-3 rounded-2xl text-[15px] md:text-sm font-bold transition-all border ${videoGenerationType === 'img2vid' ? 'bg-sky-50 border-sky-200 text-sky-700 shadow-sm' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}
-                    >
-                      Frames to Video
-                    </button>
-                    <button
-                      onClick={() => { setVideoGenerationType('ref2vid'); setVideoModel('veo3_fast'); }}
-                      className={`py-4 md:py-3 rounded-2xl text-[15px] md:text-sm font-bold transition-all border ${videoGenerationType === 'ref2vid' ? 'bg-sky-50 border-sky-200 text-sky-700 shadow-sm' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}
-                    >
-                      Reference to Video
-                    </button>
-                  </div>
-                </div>
-
-                {/* Prompt */}
-                <div className="space-y-2 mt-4">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Video Scene Prompt</label>
-                  <textarea
-                    value={videoPrompt}
-                    onChange={(e) => setVideoPrompt(e.target.value)}
-                    rows={3}
-                    placeholder="Describe the motion, action, and scene..."
-                    className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 text-base focus:outline-none focus:border-[#0A2342] focus:ring-1 focus:ring-[#0A2342] transition-all placeholder:text-slate-400 text-slate-800 resize-none shadow-sm"
-                  />
-                </div>
-
-                {/* Model & Aspect Ratio */}
-                <div className="grid grid-cols-2 gap-6 pt-2">
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Veo Model</label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        onClick={() => setVideoModel('veo3')}
-                        disabled={videoGenerationType === 'ref2vid'}
-                        className={`py-3 md:py-2 px-1 rounded-xl text-xs sm:text-sm font-bold transition-all border ${videoModel === 'veo3' ? 'bg-sky-50 border-sky-200 text-sky-700 shadow-sm' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white'}`}
-                      >
-                        Veo 3
-                      </button>
-                      <button
-                        onClick={() => setVideoModel('veo3_fast')}
-                        className={`py-3 md:py-2 px-1 rounded-xl text-xs sm:text-sm font-bold transition-all border ${videoModel === 'veo3_fast' ? 'bg-sky-50 border-sky-200 text-sky-700 shadow-sm' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}
-                      >
-                        Veo 3 Fast
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">Format</label>
-                    <div className="grid grid-cols-2 gap-2">
-                      {VIDEO_ASPECT_RATIOS.map((ratio) => (
-                        <button
-                          key={ratio}
-                          onClick={() => setVideoAspectRatio(ratio)}
-                          className={`py-3 md:py-2 px-1 rounded-xl text-xs sm:text-sm font-bold transition-all border ${videoAspectRatio === ratio ? 'bg-sky-50 border-sky-200 text-sky-700 shadow-sm' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}
-                        >
-                          {ratio}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Generate Button Videos */}
-                <button
-                  onClick={handleVideoGenerate}
-                  disabled={isGenerating || images.length === 0}
-                  className={`w-full py-5 rounded-2xl font-black text-lg flex items-center justify-center gap-2 transition-all shadow-[0_4px_14px_0_rgba(10,35,66,0.39)] hover:shadow-[0_6px_20px_rgba(10,35,66,0.23)] hover:bg-[#15345d] ${isGenerating || images.length === 0 ? 'bg-[#0A2342]/50 cursor-not-allowed shadow-none hover:shadow-none' : 'bg-[#0A2342] text-white active:scale-[0.98]'}`}
-                >
-                  {isGenerating ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" /> Rendering Frame...
-                    </>
-                  ) : (
-                    <>
-                      <Video className="w-5 h-5" /> Animate Scene
-                    </>
-                  )}
-                </button>
-              </>
-            )}
-
-            {activeTab === 'image' && (
-              <div className="pt-4 border-t border-slate-100 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <History className="w-4 h-4 text-slate-600" />
-                    <h3 className="text-sm font-bold text-slate-700">Generation History</h3>
-                  </div>
-                  <button
-                    onClick={clearHistory}
-                    disabled={generationHistory.length === 0}
-                    className="text-xs px-3 py-1.5 rounded-full border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Clear
-                  </button>
-                </div>
-
-                {generationHistory.length === 0 ? (
-                  <p className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
-                    No history yet. Generated images will be saved on this device.
-                  </p>
-                ) : (
-                  <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-                    {generationHistory.map((entry) => {
-                      const entryOutputs = Array.isArray(entry?.outputs) ? entry.outputs : [];
-                      const firstOutputUrl = entryOutputs.length > 0 ? getResultImageUrl(entryOutputs[0]) : '';
-                      return (
-                        <article key={entry.id || `${entry.createdAt || 'time'}-${entry.prompt || 'prompt'}`} className="rounded-2xl border border-slate-200 bg-slate-50/70 p-3 space-y-3">
-                          <div className="flex items-start justify-between gap-2">
-                            <span className="text-[11px] text-slate-500 font-semibold">{formatHistoryDate(entry.createdAt)}</span>
-                            <span className="text-[11px] font-bold text-rose-600">
-                              {getTokenCostLabel(toNumberOrNull(entry.totalTokenUsed), entry.costMode || 'estimated')}
-                            </span>
+                                <div className="absolute left-3 right-3 bottom-3 rounded-xl px-3 py-2.5 shadow-sm transition-all" style={{background:'rgba(6,8,17,0.75)',border:'1px solid rgba(255,255,255,0.08)',backdropFilter:'blur(12px)'}}>
+                                  <div className="flex items-center justify-between text-[11px] sm:text-xs font-bold tracking-wide" style={{color:'var(--text-soft)'}}>
+                                    <span>Image {card.index + 1}</span>
+                                    <span style={{color: card.done ? 'var(--accent)' : 'var(--text-muted)'}}>{card.done ? 'Completed' : 'Processing'}</span>
+                                  </div>
+                                  <p className="mt-1 text-sm sm:text-base font-black tracking-tight" style={{color:'var(--text)'}}>
+                                    {formatElapsedClock(card.seconds)} {card.done ? 'to generate' : 'elapsed'}
+                                  </p>
+                                </div>
+                              </article>
+                            ))}
                           </div>
-                          <p className="text-xs text-slate-700 leading-snug">
-                            {entry.prompt || 'Prompt unavailable'}
+
+                          <div className="mt-4 sm:mt-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                            <div className="flex items-center gap-3">
+                              <div className="px-3 py-1.5 rounded-full text-sm font-black tracking-wider flex items-center gap-1.5" style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'var(--text)'}}>
+                                <Clock3 className="w-4 h-4" style={{color:'var(--accent)'}} />
+                                {formatElapsedClock(elapsedSeconds)}
+                              </div>
+                              <p className="text-[11px] sm:text-sm font-bold uppercase tracking-[0.12em]" style={{color:'var(--text-soft)'}}>
+                                {taskState || 'Running image synthesis...'}
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => {
+                                generationControllerRef.current?.abort();
+                                setTaskState('Cancelling generation...');
+                              }}
+                              className="mejin-btn-danger px-5 py-2.5 rounded-full text-xs font-bold uppercase tracking-wider transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="py-8 sm:py-10 flex flex-col items-center gap-4">
+                          <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+                          <div className="text-slate-800 text-4xl font-black tracking-tight">
+                            {formatElapsedClock(elapsedSeconds)}
+                          </div>
+                          <p className="text-xs sm:text-sm uppercase tracking-[0.16em] font-semibold text-slate-600 text-center">
+                            {taskState || 'Processing...'}
                           </p>
-                          <div className="grid grid-cols-4 gap-2">
-                            {entryOutputs.slice(0, 4).map((output, index) => {
-                              const outputUrl = getResultImageUrl(output);
-                              const outputCost = getResultImageCost(output);
-                              const outputPrompt = getResultImagePrompt(output) || entry.prompt || '';
-                              if (!outputUrl) return null;
+                          <button
+                            onClick={() => {
+                              generationControllerRef.current?.abort();
+                              setTaskState('Cancelling generation...');
+                            }}
+                            className="mejin-btn-danger px-5 py-2.5 rounded-full text-xs font-bold uppercase tracking-wider transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {currentResultValid && !isGenerating && (
+                <div className="absolute inset-0 p-3 sm:p-4 transition-all duration-500 flex flex-col">
+                  <div className="absolute top-3 sm:top-6 left-3 sm:left-6 right-3 sm:right-6 z-40 flex justify-between items-start pointer-events-none flex-col sm:flex-row gap-2 sm:gap-0">
+                    <button
+                      onClick={() => {
+                        setResultImages(null);
+                        setSelectedResult(null);
+                        setPreferredResultIndex(null);
+                        setVideoResultUrl(null);
+                        setMobileView('controls');
+                      }}
+                      className="pointer-events-auto px-5 py-2.5 rounded-full text-sm font-bold backdrop-blur-md shadow-lg transition-all hover:scale-105" style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.12)',color:'var(--text)'}}
+                    >
+                      {'←'} Go Back
+                    </button>
+                    <div className="pointer-events-auto backdrop-blur-md rounded-full px-4 py-2 flex items-center gap-2 text-xs font-bold shadow-lg max-w-full sm:max-w-md" style={{background:'rgba(79,139,255,0.1)',border:'1px solid rgba(79,139,255,0.25)',color:'#93c5fd'}}>
+                      <AlertCircle className="w-4 h-4 shrink-0" style={{color:'#60a5fa'}} />
+                      Save results before leaving! Changes will be lost.
+                    </div>
+                  </div>
+                  <div className="flex-1 w-full h-full relative flex items-center justify-center p-4">
+                    {activeTab === 'image' && resultImages && (
+                      selectedResult !== null ? (
+                        <div className="w-full h-full relative group">
+                          <button
+                            onClick={() => setSelectedResult(null)}
+                            className="absolute top-6 right-6 z-40 mejin-btn-danger px-5 py-2.5 rounded-full text-sm font-bold backdrop-blur-md shadow-lg transition-all"
+                          >
+                            <X className="w-4 h-4 inline-block mr-1" /> Close
+                          </button>
+                          {selectedResultItem && preferredResultIndex === selectedResult && (
+                            <div className="absolute top-6 left-6 z-40 rounded-full px-4 py-2 text-xs font-black uppercase tracking-wider shadow-lg" style={{background:'linear-gradient(135deg,var(--accent),var(--accent-2))',color:'#fff'}}>
+                              Selected
+                            </div>
+                          )}
+                          <div className="w-full h-full bg-slate-50 rounded-[2rem] border border-slate-200 overflow-hidden shadow-inner p-2 flex items-center justify-center">
+                            <img
+                              src={getResultImageUrl(selectedResultItem)}
+                              alt="Selected Result"
+                              className="max-w-full max-h-full object-contain rounded-2xl shadow-xl transition-all duration-500"
+                            />
+                          </div>
+                          {Number.isFinite(getResultImageCost(selectedResultItem)) && (
+                            <p className="mt-3 text-center text-sm font-bold text-sky-600">
+                              {getTokenCostLabel(getResultImageCost(selectedResultItem), selectedResultItem?.tokenMode || 'estimated')}
+                            </p>
+                          )}
+                          {Number.isFinite(getResultImageGenerationSeconds(selectedResultItem)) && (
+                            <p className="mt-2 text-center text-xs font-bold uppercase tracking-wider text-blue-300">
+                              Generated in {getResultImageGenerationSeconds(selectedResultItem)}s
+                            </p>
+                          )}
+                          {getResultImagePrompt(selectedResultItem) && (
+                            <div className="mt-3 mx-auto max-w-4xl rounded-xl p-3" style={{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)'}}>
+                              <p className="text-[11px] font-bold uppercase tracking-wider mb-2" style={{color:'var(--text-muted)'}}>Prompt Used</p>
+                              <pre className="text-xs leading-relaxed font-mono whitespace-pre-wrap break-words" style={{color:'var(--text-soft)'}}>
+                                {getResultImagePrompt(selectedResultItem)}
+                              </pre>
+                            </div>
+                          )}
+                          <div className="absolute bottom-4 sm:bottom-10 left-0 right-0 flex flex-wrap justify-center gap-3 sm:gap-4 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-300 px-3 sm:px-4">
+                            <button
+                              onClick={() => handleEnhanceTo4K(getResultImageUrl(selectedResultItem))}
+                              className="mejin-btn-primary px-6 py-3 rounded-full font-bold flex items-center gap-2"
+                            >
+                              <Sparkles className="w-4 h-4" />
+                              Enhance 4K
+                            </button>
+
+                            <a
+                              href={getResultImageUrl(selectedResultItem)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="btn-ghost px-6 py-3 rounded-full font-bold flex items-center gap-2"
+                            >
+                              <Download className="w-4 h-4" />
+                              Save
+                            </a>
+
+                            <button
+                              onClick={handleRerollFromPreferred}
+                              className="btn-ghost px-6 py-3 rounded-full font-bold flex items-center gap-2"
+                            >
+                              <Wand2 className="w-4 h-4" />
+                              Reroll
+                            </button>
+
+                            <button
+                              onClick={() => handleImportSelectedResultToVeo(selectedResultItem)}
+                              className="btn-ghost px-6 py-3 rounded-full font-bold flex items-center gap-2"
+                            >
+                              <Video className="w-4 h-4" />
+                              To Veo
+                            </button>
+
+                            <button
+                              onClick={() => handleRegenerateFromVariant(getResultImageUrl(selectedResultItem))}
+                              className="btn-ghost px-6 py-3 rounded-full font-bold flex items-center gap-2"
+                            >
+                              <LayoutTemplate className="w-4 h-4" />
+                              Use as Base
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="w-full h-full flex flex-col pt-14 sm:pt-16" style={{minHeight:0}}>
+                          <h2 className="text-lg sm:text-xl font-black mb-2 sm:mb-3 text-center tracking-tight shrink-0" style={{color:'var(--text)'}}>Select result(s)</h2>
+                          <div className={`grid grid-cols-2 gap-2 sm:gap-3 w-full px-1 sm:px-3 overflow-hidden`} style={{flex:'1 1 0',minHeight:0}}>
+                            {resultImages.map((resultItem, idx) => {
+                              const resultCost = getResultImageCost(resultItem);
+                              const resultPrompt = getResultImagePrompt(resultItem);
+                              const isPreferred = preferredResultIndex === idx;
 
                               return (
-                                <div key={`${entry.id || 'entry'}-${index}`} className="space-y-1">
+                                <div
+                                  key={idx}
+                                  className={`result-card rounded-2xl border-2 cursor-pointer ${
+                                    selectedResultIndices.has(idx)
+                                      ? 'border-blue-500 shadow-[0_0_16px_rgba(79,139,255,0.45)]'
+                                      : 'border-transparent'
+                                  } bg-black/30`}
+                                  style={{aspectRatio:'3/4',minHeight:0}}
+                                  onClick={() => {
+                                    const next = new Set(selectedResultIndices);
+                                    if (next.has(idx)) next.delete(idx); else next.add(idx);
+                                    setSelectedResultIndices(next);
+                                    setPreferredResultIndex(next.size > 0 ? [...next][next.size-1] : null);
+                                  }}
+                                >
+                                  {/* Checkbox indicator */}
+                                  <div className={`img-checkbox ${selectedResultIndices.has(idx) ? 'checked' : ''}`}>
+                                    {selectedResultIndices.has(idx) && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
+                                  </div>
+                                  <img
+                                    src={getResultImageUrl(resultItem)}
+                                    alt={`Result Variant ${idx + 1}`}
+                                    className="absolute inset-0 w-full h-full object-cover rounded-2xl transition-transform duration-500 group-hover/item:scale-105"
+                                  />
+                                  {/* Tap to view full */}
                                   <button
-                                    onClick={() => handleRegenerateFromVariant(outputUrl)}
-                                    className="relative w-full rounded-xl overflow-hidden border border-slate-200 bg-white hover:border-sky-300 transition-colors"
+                                    type="button"
+                                    className="absolute bottom-2 right-2 z-10 text-[10px] font-bold px-2 py-1 rounded-full backdrop-blur-md"
+                                    style={{background:'rgba(0,0,0,0.55)',color:'rgba(255,255,255,0.85)',border:'1px solid rgba(255,255,255,0.12)'}}
+                                    onClick={(e) => { e.stopPropagation(); setSelectedResult(idx); }}
                                   >
-                                    <img src={outputUrl} alt={`History output ${index + 1}`} className="w-full h-16 object-cover" />
-                                    {Number.isFinite(outputCost) && (
-                                      <span className="absolute bottom-1 left-1 right-1 bg-white/90 text-[10px] font-bold text-rose-600 rounded-md px-1 py-0.5 truncate">
-                                        {getTokenCostLabel(outputCost, output?.tokenMode || entry.costMode || 'estimated')}
-                                      </span>
-                                    )}
+                                    View
                                   </button>
-                                  {outputPrompt && (
-                                    <pre
-                                      className="text-[10px] font-mono text-slate-600 bg-white border border-slate-200 rounded-md px-1.5 py-1 whitespace-pre-wrap break-words overflow-hidden"
-                                      style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}
-                                    >
-                                      {outputPrompt}
-                                    </pre>
+                                  {(Number.isFinite(resultCost) || Number.isFinite(getResultImageGenerationSeconds(resultItem))) && (
+                                    <div className="absolute bottom-2 left-2 rounded-lg px-2 py-1 flex flex-col items-start gap-0 pointer-events-none z-10" style={{background:'rgba(0,0,0,0.55)',backdropFilter:'blur(6px)'}}>
+                                      {Number.isFinite(resultCost) && (
+                                        <span className="text-[9px] font-bold text-white tracking-wide">
+                                          {getTokenCostLabel(resultCost, resultItem?.tokenMode || 'estimated')}
+                                        </span>
+                                      )}
+                                      {Number.isFinite(getResultImageGenerationSeconds(resultItem)) && (
+                                        <span className="text-[9px] font-semibold text-white/75 uppercase tracking-widest">
+                                          {getResultImageGenerationSeconds(resultItem)}s
+                                        </span>
+                                      )}
+                                    </div>
                                   )}
                                 </div>
                               );
                             })}
                           </div>
-                          <div className="flex flex-wrap gap-2">
+                          <div className="mt-2 flex justify-center">
+                            <p className="text-xs font-semibold rounded-full px-4 py-2" style={{background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}>
+                              {selectedResultIndices.size > 0
+                                ? `${selectedResultIndices.size} image${selectedResultIndices.size > 1 ? 's' : ''} selected`
+                                : 'Tap images to select. Tap View to inspect.'}
+                            </p>
+                          </div>
+                          <div className="flex flex-col sm:flex-row flex-wrap justify-center items-center gap-2 mt-3 mb-4 w-full max-w-2xl px-4 mx-auto">
                             <button
-                              onClick={() => handleOpenHistoryEntry(entry)}
-                              className="text-xs px-3 py-2 rounded-full border border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                              onClick={handleRerollFromPreferred}
+                              disabled={selectedResultIndices.size === 0}
+                              className="mejin-btn-primary w-full sm:w-auto flex-1 disabled:opacity-40 disabled:cursor-not-allowed px-6 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all active:scale-95 text-sm"
                             >
-                              Open Result
+                              <Wand2 className="w-4 h-4 shrink-0" />
+                              <span className="truncate">Reroll</span>
                             </button>
                             <button
-                              onClick={() => firstOutputUrl && handleRegenerateFromVariant(firstOutputUrl)}
-                              disabled={!firstOutputUrl}
-                              className="text-xs px-3 py-2 rounded-full border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                              onClick={handleImportPreferredToVeo}
+                              disabled={selectedResultIndices.size === 0}
+                              className="btn-ghost w-full sm:w-auto flex-1 disabled:opacity-40 disabled:cursor-not-allowed px-6 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all active:scale-95 text-sm"
                             >
-                              Use First as Base
+                              <Video className="w-5 h-5 shrink-0" style={{color:'var(--accent)'}} />
+                              <span className="truncate">To Veo 3.1</span>
+                            </button>
+                            <button
+                              onClick={handleGenerate}
+                              className="btn-ghost w-full sm:w-auto flex-1 px-6 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all active:scale-95 text-sm"
+                            >
+                              <Sparkles className="w-4 h-4 shrink-0" style={{color:'var(--accent)'}} />
+                              <span className="truncate">Fresh Generate</span>
                             </button>
                           </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {error && (
-              <div className="p-4 mt-6 rounded-2xl bg-rose-50 border border-rose-200 flex items-start gap-3 text-rose-600 text-sm shadow-sm font-medium">
-                <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-                <p>{error}</p>
-              </div>
-            )}
-
-            {/* Task state info */}
-            {taskState && !error && (
-              <p className="text-xs font-bold text-center text-[#0A2342] mt-4 animate-pulse pt-2 border-t border-slate-100">{taskState}</p>
-            )}
-
-          </div>
-        </div>
-
-        {/* Right Column - Results */}
-        <div className={`${mobileView === 'preview' ? 'flex' : 'hidden'} lg:flex lg:col-span-7 xl:col-span-8 flex-col min-h-[60vh] lg:min-h-[calc(100vh-8rem)]`}>
-          <div className="relative flex-1 rounded-[1.5rem] sm:rounded-[2.5rem] bg-white border border-slate-200 shadow-[0_8px_40px_rgb(0,0,0,0.06)] flex items-center justify-center p-3 sm:p-8">
-
-            {/* Empty State / Initial Image Previews */}
-            {images.length === 0 && !isGenerating && !currentResultValid && (
-              <div className="text-center p-8 max-w-sm mx-auto flex flex-col items-center justify-center h-full">
-                <div className="w-24 h-24 mb-6 rounded-full bg-slate-50 flex items-center justify-center border-4 border-white shadow-md">
-                  <Wand2 className="w-10 h-10 text-slate-300" />
-                </div>
-                <h3 className="text-2xl font-bold text-slate-800 mb-3 tracking-tight">Your Canvas is Ready</h3>
-                <p className="text-sm text-slate-500 font-medium leading-relaxed">
-                  Upload an outfit image, describe your creative vision, and let the AI craft a studio-grade scene tailored perfectly.
-                </p>
-              </div>
-            )}
-
-            {images.length > 0 && !currentResultValid && !isGenerating && (
-              <div className="absolute inset-0 p-3 sm:p-6 flex flex-col bg-slate-50/60">
-                <div className="flex-1 overflow-y-auto">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4 w-full">
-                  {images.map((img, i) => (
-                    <div
-                      key={img.id}
-                        className="relative rounded-[1.5rem] overflow-hidden shadow-sm border border-slate-200 bg-white p-3 min-h-[180px] flex items-center justify-center transition-all duration-300 hover:border-sky-300 hover:shadow-md"
-                    >
-                      <img
-                        src={img.url}
-                        alt={`Preview ${i + 1}`}
-                          className="w-full h-full max-h-[46vh] object-contain rounded-2xl bg-slate-50"
-                        onError={(e) => {
-                          e.target.onerror = null;
-                          e.target.src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 24 24" fill="none" stroke="%2394a3b8" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="9" x2="15" y2="15"></line><line x1="15" y1="9" x2="9" y2="15"></line></svg>';
-                        }}
-                      />
-
-                      {i === 0 && (
-                        <div className="absolute top-4 left-4 z-20 bg-white/90 backdrop-blur-md px-4 py-2 rounded-full text-xs font-black text-[#0A2342] shadow-sm border border-white/50 flex items-center gap-1.5 uppercase tracking-wider">
-                          <Sparkles className="w-4 h-4 text-sky-500" /> Primary
                         </div>
-                      )}
-                    </div>
-                  ))}
-                  </div>
-                </div>
-                <div className="pt-3 sm:pt-4 flex justify-center">
-                  <div className="bg-white/90 backdrop-blur-md px-5 py-2.5 rounded-full text-sm font-bold text-slate-700 border border-slate-200 shadow-sm flex items-center gap-2">
-                    <ImageIcon className="w-4 h-4 text-sky-500" />
-                    {images.length} Image{images.length > 1 ? 's' : ''} Uploaded & Ready
-                  </div>
-                </div>
-              </div>
-            )}
+                      )
+                    )}
 
-            {/* Loading State Overlay */}
-            {isGenerating && (
-              <div className="absolute inset-0 z-30 flex items-center justify-center bg-white/90 backdrop-blur-3xl transition-opacity duration-1000">
-                {/* Visual feedback behind the spinner */}
-                {images.length > 0 && (
-                  <div
-                    className="absolute inset-0 opacity-10 scale-110 saturate-[0.2]"
-                    style={{
-                      backgroundImage: `url(${images[0].url})`,
-                      backgroundSize: 'cover',
-                      backgroundPosition: 'center',
-                      filter: 'blur(30px)',
-                      transition: 'all 20s ease-in-out',
-                    }}
-                  />
-                )}
-
-                <div className="relative z-40 flex flex-col items-center p-8 sm:p-12 bg-white/50 rounded-[2rem] sm:rounded-full shadow-[0_8px_30px_rgb(0,0,0,0.02)] backdrop-blur-xl border border-white">
-                  {/* Timer UI */}
-                  <div className="text-[#0A2342] font-mono text-4xl sm:text-6xl font-black tracking-tighter mb-6 sm:mb-8 drop-shadow-sm">
-                    {Math.floor(elapsedSeconds / 60).toString().padStart(2, '0')}:{(elapsedSeconds % 60).toString().padStart(2, '0')}
-                  </div>
-
-                  <div className="relative w-20 h-20 sm:w-28 sm:h-28 mb-6 sm:mb-8 shadow-inner rounded-full bg-slate-50/50">
-                    <div className="absolute inset-0 border-t-4 border-[#0A2342] rounded-full animate-spin"></div>
-                    <div className="absolute inset-3 border-r-4 border-sky-400 rounded-full animate-spin animation-delay-150"></div>
-                    <div className="absolute inset-6 border-b-4 border-slate-200 rounded-full animate-spin animation-delay-300"></div>
-                    <Sparkles className="absolute inset-0 m-auto w-8 h-8 text-sky-500 animate-pulse" />
-                  </div>
-                  <h3 className="text-2xl font-black text-slate-800 mb-2 tracking-tight">Crafting Magic...</h3>
-                  <p className="text-xs sm:text-sm text-sky-600 font-bold animate-pulse max-w-[90%] sm:max-w-[80%] text-center tracking-wider uppercase">{taskState}</p>
-                  <button
-                    onClick={() => {
-                      generationControllerRef.current?.abort();
-                      setTaskState('Cancelling generation...');
-                    }}
-                    className="mt-6 px-5 py-2 rounded-full border border-slate-300 text-xs font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-100 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {currentResultValid && !isGenerating && (
-              <div className="absolute inset-0 p-3 sm:p-4 transition-all duration-500 flex flex-col">
-                <div className="absolute top-3 sm:top-6 left-3 sm:left-6 right-3 sm:right-6 z-40 flex justify-between items-start pointer-events-none flex-col sm:flex-row gap-2 sm:gap-0">
-                  <button
-                    onClick={() => {
-                      setResultImages(null);
-                      setSelectedResult(null);
-                      setVideoResultUrl(null);
-                      setMobileView('controls');
-                    }}
-                    className="pointer-events-auto bg-white/90 hover:bg-slate-50 text-slate-800 px-5 py-2.5 rounded-full border border-slate-200 text-sm font-bold backdrop-blur-md shadow-lg transition-all"
-                  >
-                    {'<-'} Go Back
-                  </button>
-                  <div className="pointer-events-auto bg-amber-50 border border-amber-200 backdrop-blur-md rounded-full px-4 py-2 flex items-center gap-2 text-xs font-bold text-amber-700 shadow-lg max-w-full sm:max-w-md">
-                    <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
-                    Save results before leaving! Changes will be lost.
-                  </div>
-                </div>
-                <div className="flex-1 w-full h-full relative flex items-center justify-center p-4">
-                  {activeTab === 'image' && resultImages && (
-                    selectedResult !== null ? (
-                      <div className="w-full h-full relative group">
-                        <button
-                          onClick={() => setSelectedResult(null)}
-                          className="absolute top-6 right-6 z-40 bg-white/90 hover:bg-slate-50 text-slate-800 px-5 py-2.5 rounded-full border border-slate-200 text-sm font-bold backdrop-blur-md shadow-lg transition-all"
-                        >
-                          <X className="w-4 h-4 inline-block mr-1" /> Close
-                        </button>
-                        <div className="w-full h-full bg-slate-50 rounded-[2rem] border border-slate-200 overflow-hidden shadow-inner p-2 flex items-center justify-center">
-                          <img
-                            src={getResultImageUrl(resultImages[selectedResult])}
-                            alt="Selected Result"
-                            className="max-w-full max-h-full object-contain rounded-2xl shadow-xl transition-all duration-500"
+                    {activeTab === 'video' && videoResultUrl && (
+                      <div className="w-full h-full relative group flex items-center justify-center p-4">
+                        <div className="w-full max-w-4xl max-h-full bg-slate-50 rounded-[2.5rem] p-3 border border-slate-200 shadow-2xl">
+                          <video
+                            src={videoResultUrl}
+                            controls
+                            autoPlay
+                            loop
+                            muted
+                            className="w-full h-full object-contain rounded-[2rem]"
                           />
                         </div>
-                        {Number.isFinite(getResultImageCost(resultImages[selectedResult])) && (
-                          <p className="mt-3 text-center text-sm font-bold text-rose-600">
-                            {getTokenCostLabel(getResultImageCost(resultImages[selectedResult]), resultImages[selectedResult]?.tokenMode || 'estimated')}
-                          </p>
-                        )}
-                        {getResultImagePrompt(resultImages[selectedResult]) && (
-                          <div className="mt-3 mx-auto max-w-4xl bg-white border border-slate-200 rounded-xl p-3 shadow-sm">
-                            <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2">Prompt Used</p>
-                            <pre className="text-xs leading-relaxed font-mono text-slate-700 whitespace-pre-wrap break-words">
-                              {getResultImagePrompt(resultImages[selectedResult])}
-                            </pre>
-                          </div>
-                        )}
-                        <div className="absolute bottom-4 sm:bottom-10 left-0 right-0 flex flex-wrap justify-center gap-3 sm:gap-4 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-300 px-3 sm:px-4">
-                          <button
-                            onClick={() => handleEnhanceTo4K(getResultImageUrl(resultImages[selectedResult]))}
-                            className="bg-[#0A2342] hover:bg-[#15345d] text-white px-6 py-3.5 rounded-full font-bold flex items-center gap-2 shadow-xl transition-all hover:scale-105"
-                          >
-                            <Sparkles className="w-4 h-4 text-sky-300" />
-                            Enhance to 4K
-                          </button>
-
+                        <div className="absolute bottom-4 sm:bottom-10 left-0 right-0 flex justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-300 px-4">
                           <a
-                            href={getResultImageUrl(resultImages[selectedResult])}
+                            href={videoResultUrl}
                             target="_blank"
                             rel="noreferrer"
-                            className="bg-white text-slate-800 border border-slate-200 hover:bg-slate-50 px-6 py-3.5 rounded-full font-bold flex items-center gap-2 shadow-xl transition-all hover:scale-105"
+                            className="bg-white/90 hover:bg-white text-slate-800 backdrop-blur-md border border-slate-200 px-8 py-4 rounded-full font-black flex items-center gap-2 shadow-xl transition-all hover:scale-105"
                           >
-                            <Download className="w-4 h-4" />
-                            Save Image
+                            <Download className="w-5 h-5" />
                           </a>
-
-                          <button
-                            onClick={() => handleRegenerateFromVariant(getResultImageUrl(resultImages[selectedResult]))}
-                            className="bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100 px-6 py-3.5 rounded-full font-bold flex items-center gap-2 shadow-xl transition-all hover:scale-105"
-                          >
-                            <LayoutTemplate className="w-4 h-4" />
-                            Use as New Base
-                          </button>
                         </div>
                       </div>
-                    ) : (
-                      <div className="w-full h-full flex flex-col pt-16 sm:pt-20">
-                        <h2 className="text-xl sm:text-2xl font-black text-slate-800 mb-5 sm:mb-6 text-center tracking-tight">Select your preferred layout</h2>
-                        <div className={`grid ${resultImages.length === 2 ? 'grid-cols-1 sm:grid-cols-2 max-w-3xl mx-auto' : 'grid-cols-1 sm:grid-cols-2'} gap-4 sm:gap-6 w-full flex-1 px-2 sm:px-10 pb-4 sm:pb-6 overflow-y-auto`}>
-                          {resultImages.map((resultItem, idx) => {
-                            const resultCost = getResultImageCost(resultItem);
-                            const resultPrompt = getResultImagePrompt(resultItem);
-
-                            return (
-                              <div key={idx} className="relative group/item rounded-[2rem] overflow-hidden border-4 border-white bg-slate-50 cursor-pointer shadow-[0_8px_30px_rgb(0,0,0,0.08)] hover:border-sky-300 transition-all flex items-center justify-center h-full" onClick={() => setSelectedResult(idx)}>
-                                <img
-                                  src={getResultImageUrl(resultItem)}
-                                  alt={`Result Variant ${idx + 1}`}
-                                  className="max-w-full max-h-[90%] object-contain opacity-100 group-hover/item:scale-[1.02] transition-all duration-500 rounded-xl"
-                                />
-                                {(Number.isFinite(resultCost) || resultPrompt) && (
-                                  <div className="absolute bottom-3 left-3 right-3 bg-white/90 rounded-lg px-2 py-1.5 border border-slate-200">
-                                    {Number.isFinite(resultCost) && (
-                                      <p className="text-[11px] font-bold text-rose-600 text-center">
-                                        {getTokenCostLabel(resultCost, resultItem?.tokenMode || 'estimated')}
-                                      </p>
-                                    )}
-                                    {resultPrompt && (
-                                      <pre
-                                        className="mt-1 text-[10px] font-mono text-slate-700 whitespace-pre-wrap break-words overflow-hidden"
-                                        style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}
-                                      >
-                                        {resultPrompt}
-                                      </pre>
-                                    )}
-                                  </div>
-                                )}
-                                <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover/item:opacity-100 transition-opacity">
-                                  <div className="bg-[#0A2342] text-white px-6 py-3 rounded-full font-bold shadow-[0_8px_30px_rgb(0,0,0,0.2)] flex items-center gap-2 transform translate-y-4 group-hover/item:translate-y-0 transition-all hover:bg-[#15345d]">
-                                    <Sparkles className="w-4 h-4 text-sky-300" />
-                                    View Result
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                        <div className="flex justify-center mt-2 mb-8">
-                          <button
-                            onClick={handleGenerate}
-                            className="bg-white hover:bg-slate-50 text-slate-800 px-8 py-4 rounded-full font-black flex items-center gap-2 shadow-[0_8px_30px_rgb(0,0,0,0.06)] transition-all hover:scale-105 border border-slate-200"
-                          >
-                            <Sparkles className="w-5 h-5 text-sky-500" />
-                            Regenerate Options
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  )}
-
-                  {activeTab === 'video' && videoResultUrl && (
-                    <div className="w-full h-full relative group flex items-center justify-center p-4">
-                      <div className="w-full max-w-4xl max-h-full bg-slate-50 rounded-[2.5rem] p-3 border border-slate-200 shadow-2xl">
-                        <video
-                          src={videoResultUrl}
-                          controls
-                          autoPlay
-                          loop
-                          muted
-                          className="w-full h-full object-contain rounded-[2rem]"
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+          {/* Prompt & Config Card */}
+          <div className="mejin-panel p-5 flex flex-col gap-4">
+              {/* Generation Output Configuration - Conditional on Tab */}
+              {activeTab === 'image' ? (
+                    <>
+                      {/* Prompt */}
+                      <div className="space-y-2 pt-2 text-left">
+                        <span className="section-label">Prompt</span>
+                        <textarea
+                          value={prompt}
+                          onChange={(e) => setPrompt(e.target.value)}
+                          rows={2}
+                          placeholder="Describe the scene for your image..."
+                          className="mejin-textarea w-full px-4 py-3"
                         />
                       </div>
-                      <div className="absolute bottom-4 sm:bottom-10 left-0 right-0 flex justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-300 px-4">
-                        <a
-                          href={videoResultUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="bg-white/90 hover:bg-white text-slate-800 backdrop-blur-md border border-slate-200 px-8 py-4 rounded-full font-black flex items-center gap-2 shadow-xl transition-all hover:scale-105"
+                      <div className="mejin-alert mejin-alert--info" style={{justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:'8px'}}>
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="w-4 h-4" style={{color:'var(--primary)'}} />
+                          <span className="text-sm font-bold" style={{color:'var(--text)'}}>GPT-5.2 Image Analysis</span>
+                        </div>
+                        <button
+                          onClick={handleAnalyzePrompt}
+                          disabled={isAnalyzingSuggestions || images.length === 0}
+                          className="mejin-btn-secondary text-xs px-4 py-2 rounded-full disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                         >
-                          <Download className="w-5 h-5" />
-                          Save Video Animation
-                        </a>
+                          {isAnalyzingSuggestions ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              Analyzing...
+                            </>
+                          ) : (
+                            'Analyze with AI'
+                          )}
+                        </button>
                       </div>
-                    </div>
+
+                      {/* Number of Outputs */}
+                      <div className="space-y-3 pt-4" style={{borderTop:'1px solid var(--border)'}}>
+                        <div className="flex justify-between items-center">
+                          <span className="section-label">Output Variations</span>
+                          <div className="flex rounded-full p-1" style={{background:'var(--bg-base)',border:'1px solid var(--border)'}}>
+                            <button
+                              onClick={() => setNumOutputs(2)}
+                              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${numOutputs === 2 ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
+                            >
+                              2 Layouts
+                            </button>
+                            <button
+                              onClick={() => setNumOutputs(4)}
+                              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${numOutputs === 4 ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
+                            >
+                              4 Layouts
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Resolution & Aspect Ratio */}
+                      <div className="grid grid-cols-2 gap-4 pt-4" style={{borderTop:'1px solid var(--border)'}}>
+                        <div className="space-y-2">
+                          <span className="section-label">Resolution</span>
+                          <div className="grid grid-cols-3 gap-1.5">
+                            {['1K', '2K', '4K'].map((res) => (
+                              <button
+                                key={res}
+                                onClick={() => setResolution(res)}
+                                className={`py-2 rounded-xl text-xs font-bold transition-all ${resolution === res ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
+                              >
+                                {res}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <span className="section-label">Aspect Ratio</span>
+                          <div className="grid grid-cols-3 gap-1.5">
+                            {['auto', '1:1', '4:3', '3:4', '16:9', '9:16'].map((ratio) => (
+                              <button
+                                key={ratio}
+                                onClick={() => setAspectRatio(ratio)}
+                                className={`py-2 rounded-xl text-xs font-bold transition-all ${aspectRatio === ratio ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
+                              >
+                                {ratio}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                    </>
+                  ) : (
+                    <>
+                      {/* Type */}
+                      <div className="space-y-2 pt-2">
+                        <label className="text-xs font-bold uppercase tracking-wider ml-1" style={{color:'var(--text-muted)'}}>Generation Type</label>
+                        <div className="grid grid-cols-2 gap-3">
+                          <button
+                            onClick={() => { setVideoGenerationType('img2vid'); setVideoModel('veo3'); }}
+                            className={`py-4 md:py-3 rounded-2xl text-[15px] md:text-sm font-bold transition-all`}
+                            style={videoGenerationType === 'img2vid' ? {background:'var(--accent)',color:'#fff',border:'1px solid rgba(79,139,255,0.5)',boxShadow:'0 4px 12px var(--accent-glow)'} : {background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}
+                          >
+                            Frames to Video
+                          </button>
+                          <button
+                            onClick={() => { setVideoGenerationType('ref2vid'); setVideoModel('veo3_fast'); }}
+                            className={`py-4 md:py-3 rounded-2xl text-[15px] md:text-sm font-bold transition-all`}
+                            style={videoGenerationType === 'ref2vid' ? {background:'var(--accent)',color:'#fff',border:'1px solid rgba(79,139,255,0.5)',boxShadow:'0 4px 12px var(--accent-glow)'} : {background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}
+                          >
+                            Reference to Video
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Prompt */}
+                      <div className="space-y-2 mt-4">
+                        <label className="text-xs font-bold uppercase tracking-wider ml-1" style={{color:'var(--text-muted)'}}>Video Scene Prompt</label>
+                        <textarea
+                          value={videoPrompt}
+                          onChange={(e) => setVideoPrompt(e.target.value)}
+                          rows={3}
+                          placeholder="Describe the motion, action, and scene..."
+                          className="w-full rounded-2xl px-5 py-4 text-base transition-all resize-none"
+                          style={{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text)'}}
+                        />
+                      </div>
+
+                      {/* Model & Aspect Ratio */}
+                      <div className="grid grid-cols-2 gap-6 pt-2">
+                        <div className="space-y-2">
+                          <label className="text-xs font-bold uppercase tracking-wider ml-1" style={{color:'var(--text-muted)'}}>Veo Model</label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              onClick={() => setVideoModel('veo3')}
+                              disabled={videoGenerationType === 'ref2vid'}
+                              className="py-3 md:py-2 px-1 rounded-xl text-xs sm:text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                              style={videoModel === 'veo3' ? {background:'var(--accent)',color:'#fff',border:'1px solid rgba(79,139,255,0.5)'} : {background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}
+                            >
+                              Veo 3
+                            </button>
+                            <button
+                              onClick={() => setVideoModel('veo3_fast')}
+                              className="py-3 md:py-2 px-1 rounded-xl text-xs sm:text-sm font-bold transition-all"
+                              style={videoModel === 'veo3_fast' ? {background:'var(--accent)',color:'#fff',border:'1px solid rgba(79,139,255,0.5)'} : {background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}
+                            >
+                              Veo 3 Fast
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="text-xs font-bold uppercase tracking-wider ml-1" style={{color:'var(--text-muted)'}}>Format</label>
+                          <div className="grid grid-cols-2 gap-2">
+                            {VIDEO_ASPECT_RATIOS.map((ratio) => (
+                              <button
+                                key={ratio}
+                                onClick={() => setVideoAspectRatio(ratio)}
+                                className="py-3 md:py-2 px-1 rounded-xl text-xs sm:text-sm font-bold transition-all"
+                                style={videoAspectRatio === ratio ? {background:'var(--accent)',color:'#fff',border:'1px solid rgba(79,139,255,0.5)'} : {background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}
+                              >
+                                {ratio}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                    </>
                   )}
+
+
+          </div>{/* end config card */}
+
+          {/* Generate Button */}
+          <div className="w-full">
+            <button
+              onClick={activeTab === 'image' ? handleGenerate : handleVideoGenerate}
+              disabled={isGenerating || images.length === 0}
+              className="mejin-btn-primary w-full rounded-2xl py-4 px-6 flex flex-col items-center justify-center glow-pulse"
+              style={{minHeight:'60px'}}
+            >
+              {isGenerating ? (
+                <div className="flex items-center gap-2">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <span className="font-bold">Generating...</span>
                 </div>
+              ) : (
+                <>
+                  <span className="text-lg font-black tracking-tight">{activeTab === 'image' ? '✦ Imagine Now' : '✦ Animate Now'}</span>
+                  <span className="text-xs mt-0.5" style={{color:'rgba(255,255,255,0.65)'}}>Powered by AI</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Error */}
+          {error && (
+            <div className="mejin-alert mejin-alert--error">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <p>{error}</p>
+            </div>
+          )}
+
+          {/* Task state */}
+          {taskState && !error && (
+            <p className="text-xs font-bold text-center animate-pulse" style={{color:'var(--primary)'}}>{taskState}</p>
+          )}
+        </div>
+        )}
+
+
+      {mainTab === 'history' && (
+        <div className="w-full max-w-xl mx-auto flex flex-col items-center">
+          <div className="mejin-panel w-full rounded-[2rem] overflow-hidden p-5 sm:p-8 space-y-6 flex flex-col items-center">
+            
+            <div className="flex items-center justify-between w-full pb-4" style={{borderBottom:'1px solid var(--border)'}}>
+              <div className="flex items-center gap-2">
+                <History className="w-5 h-5" style={{color:'var(--text-secondary)'}} />
+                <h3 className="text-lg font-bold" style={{color:'var(--text)'}}>Generation History</h3>
+              </div>
+              <button
+                onClick={clearHistory}
+                disabled={generationHistory.length === 0}
+                className="mejin-btn-danger text-xs px-4 py-2 rounded-full disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Clear
+              </button>
+            </div>
+
+            {generationHistory.length === 0 ? (
+              <p className="text-sm rounded-xl px-4 py-8 w-full text-center font-medium" style={{color:'var(--text-muted)',background:'var(--bg-base)',border:'1px solid var(--border)'}}>
+                No history yet. Your generated images will appear here.
+              </p>
+            ) : (
+              <div className="space-y-4 w-full">
+                {generationHistory.map((entry) => {
+                  const entryOutputs = Array.isArray(entry?.outputs) ? entry.outputs : [];
+                  const firstOutputUrl = entryOutputs.length > 0 ? getResultImageUrl(entryOutputs[0]) : '';
+                  return (
+                    <article key={entry.id || `${entry.createdAt || 'time'}-${entry.prompt || 'prompt'}`} className="rounded-2xl p-4 space-y-3 transition-all card-lift" style={{background:'var(--bg-surface)',border:'1px solid var(--border)',boxShadow:'var(--shadow-xs)'}}>
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="text-xs font-medium" style={{color:'var(--text-muted)'}}>{formatHistoryDate(entry.createdAt)}</span>
+                        <span className="mejin-badge mejin-badge--blue">
+                          {getTokenCostLabel(toNumberOrNull(entry.totalTokenUsed), entry.costMode || 'estimated')}
+                        </span>
+                      </div>
+                      <p className="text-sm leading-snug" style={{color:'var(--text-secondary)'}}>
+                        {entry.prompt || 'Prompt unavailable'}
+                      </p>
+                      <div className="grid grid-cols-4 gap-2">
+                        {entryOutputs.slice(0, 4).map((output, index) => {
+                          const outputUrl = getResultImageUrl(output);
+                          const outputCost = getResultImageCost(output);
+                          const outputPrompt = getResultImagePrompt(output) || entry.prompt || '';
+                          if (!outputUrl) return null;
+
+                          return (
+                            <div key={`${entry.id || 'entry'}-${index}`} className="space-y-1">
+                              <button
+                                onClick={() => {
+                                  handleRegenerateFromVariant(outputUrl);
+                                  setMainTab('home');
+                                }}
+                                className="relative w-full rounded-xl overflow-hidden transition-colors" style={{border:'1px solid rgba(255,255,255,0.08)',background:'rgba(0,0,0,0.3)'}}
+                              >
+                                <img src={outputUrl} alt={`History output ${index + 1}`} className="w-full h-16 sm:h-20 object-cover" />
+                                {Number.isFinite(outputCost) && (
+                                  <span className="absolute bottom-1 left-1 right-1 text-[10px] font-bold text-white rounded-md px-1 py-0.5 truncate" style={{background:'rgba(0,0,0,0.6)'}}>
+                                    {getTokenCostLabel(outputCost, output?.tokenMode || entry.costMode || 'estimated')}
+                                  </span>
+                                )}
+                              </button>
+                              {outputPrompt && (
+                                <pre
+                                  className="text-[10px] font-mono rounded-md px-1.5 py-1 whitespace-pre-wrap break-words overflow-hidden" style={{color:'var(--text-muted)',background:'rgba(255,255,255,0.03)',border:'1px solid rgba(255,255,255,0.06)',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}
+                                >
+                                  {outputPrompt}
+                                </pre>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="flex flex-wrap gap-2 pt-2">
+                        <button
+                          onClick={() => {
+                            handleOpenHistoryEntry(entry);
+                            setMainTab('home');
+                          }}
+                          className="text-xs px-4 py-2 rounded-full font-bold transition-all hover:opacity-80" style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'var(--text)'}}
+                        >
+                          Open Result
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (firstOutputUrl) {
+                              handleRegenerateFromVariant(firstOutputUrl);
+                              setMainTab('home');
+                            }
+                          }}
+                          disabled={!firstOutputUrl}
+                          className="text-xs px-4 py-2 rounded-full font-bold disabled:opacity-40 disabled:cursor-not-allowed transition-all hover:opacity-80" style={{background:'rgba(79,139,255,0.1)',border:'1px solid rgba(79,139,255,0.25)',color:'#93c5fd'}}
+                        >
+                          Use First as Base
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
               </div>
             )}
           </div>
         </div>
+      )}
+
+      {/* Main Tab Views: Settings */}
+      {mainTab === 'settings' && (
+        <div className="w-full max-w-xl mx-auto flex flex-col items-center">
+          <div className="mejin-panel w-full rounded-[2rem] overflow-hidden p-5 sm:p-8 space-y-6 flex flex-col">
+            
+            <div className="flex items-center gap-2 pb-4" style={{borderBottom:'1px solid rgba(255,255,255,0.07)'}}>
+              <Settings className="w-6 h-6" style={{color:'var(--text-soft)'}} />
+              <h2 className="text-xl font-bold tracking-tight" style={{color:'var(--text)'}}>Settings</h2>
+            </div>
+            
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-bold uppercase tracking-wider text-left" style={{color:'var(--text-muted)'}}>Kie.ai Access Token</label>
+                <span className={`text-xs font-bold uppercase tracking-wider`} style={{color: connectionStatus === 'success' && !hasLowBalance ? 'var(--success)' : 'var(--danger)'}}>
+                  {connectionStatus === 'success' && !hasLowBalance ? `Connected (${normalizedCredits !== null ? normalizedCredits.toFixed(2) : '0.00'} Tokens)` : 'Disconnected'}
+                </span>
+              </div>
+              <p className="text-sm" style={{color:'var(--text-soft)'}}>
+                To generate images and use the GPT-5-2 Vision analyzer, you need a valid Kie.ai API key. Enter it below to sync.
+              </p>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <input
+                  type="password"
+                  value={apiKey}
+                  onChange={(e) => {
+                    setApiKey(e.target.value);
+                    setConnectionStatus('idle');
+                    setCredits(null);
+                  }}
+                  placeholder="Paste token..."
+                  className="flex-1 rounded-xl px-4 py-4 text-base"
+                  style={{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.1)',color:'var(--text)'}}
+                />
+                <button
+                  onClick={handleTestConnection}
+                  disabled={isTestingConnection || !apiKey}
+                  className="mejin-btn-primary disabled:opacity-40 px-6 py-4 rounded-xl text-sm font-bold transition-all active:scale-95 sm:w-auto w-full"
+                >
+                  Sync Token
+                </button>
+              </div>
+              {connectionMessage && (
+                <p className={`text-sm font-semibold mt-2`} style={{color: connectionStatus === 'success' ? 'var(--success)' : 'var(--danger)'}}>
+                  {connectionMessage}
+                </p>
+              )}
+            </div>
+
+          </div>
+        </div>
+      )}
       </main>
 
-      <nav className="fixed bottom-0 inset-x-0 z-50 lg:hidden border-t border-slate-200 bg-white/95 backdrop-blur-md px-4 py-3">
-        <div className="grid grid-cols-2 gap-2 max-w-md mx-auto">
+      {/* Bottom Navigation — Clean White Tab Bar */}
+      <nav className="mejin-nav-container">
+        <div className="max-w-xl mx-auto px-2 h-16 flex justify-around items-center">
           <button
-            onClick={() => setMobileView('controls')}
-            className={`rounded-2xl py-3 px-4 text-sm font-bold flex items-center justify-center gap-2 transition-all ${mobileView === 'controls' ? 'bg-[#0A2342] text-white shadow-md' : 'bg-slate-100 text-slate-600'}`}
+            onClick={() => { setMainTab('home'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+            className={`mejin-nav-btn ${mainTab === 'home' ? 'mejin-nav-btn--active' : ''}`}
           >
-            <Settings className="w-4 h-4" />
-            Settings
+            <div className="mejin-nav-icon-wrap"><Sparkles className="w-5 h-5" /></div>
+            <span>Generate</span>
           </button>
+
           <button
-            onClick={() => setMobileView('preview')}
-            className={`rounded-2xl py-3 px-4 text-sm font-bold flex items-center justify-center gap-2 transition-all ${mobileView === 'preview' ? 'bg-[#0A2342] text-white shadow-md' : 'bg-slate-100 text-slate-600'}`}
+            onClick={() => { setMainTab('history'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+            className={`mejin-nav-btn ${mainTab === 'history' ? 'mejin-nav-btn--active' : ''}`}
           >
-            <ImageIcon className="w-4 h-4" />
-            Preview
+            <div className="mejin-nav-icon-wrap"><History className="w-5 h-5" /></div>
+            <span>History</span>
+          </button>
+
+          <button
+            onClick={() => { setMainTab('settings'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+            className={`mejin-nav-btn ${mainTab === 'settings' ? 'mejin-nav-btn--active' : ''}`}
+          >
+            <div className="mejin-nav-icon-wrap"><Settings className="w-5 h-5" /></div>
+            <span>Settings</span>
           </button>
         </div>
       </nav>
+
+      {/* Fullscreen Image Overlay Modal */}
+      {enlargedImage && (
+        <div 
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 cursor-zoom-out"
+          onClick={() => setEnlargedImage(null)}
+        >
+          <div className="relative max-w-5xl max-h-[90vh] w-full h-full flex items-center justify-center">
+            <button
+              onClick={() => setEnlargedImage(null)}
+              className="absolute -top-4 -right-4 sm:top-0 sm:right-0 bg-rose-600 hover:bg-rose-500 text-white p-2 rounded-full shadow-lg transition-transform hover:scale-110 z-50"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <img 
+              src={enlargedImage} 
+              alt="Enlarged view" 
+              className="max-w-full max-h-full object-contain rounded-2xl shadow-2xl border border-slate-700/50 cursor-default"
+              onClick={(e) => e.stopPropagation()} 
+            />
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
 
 export default App;
+
