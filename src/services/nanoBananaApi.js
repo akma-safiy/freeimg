@@ -5,12 +5,13 @@
 const API_BASE_URL = 'https://api.kie.ai/api/v1/jobs';
 const CREDIT_URL = 'https://api.kie.ai/api/v1/chat/credit';
 const MODEL_NAME = 'nano-banana-2';
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_POLL_TIMEOUT_MS = 8 * 60_000;
 
 const isAbortError = (error) => {
-  return error?.name === 'AbortError' || /aborted|cancelled/i.test(error?.message ?? '');
+  if (!error) return false;
+  return error.name === 'AbortError' || /aborted|cancelled/i.test(error.message ?? '');
 };
 
 const assertApiKey = (apiKey) => {
@@ -98,11 +99,11 @@ const requestJson = async (url, apiKey, options = {}) => {
 
     return await response.json();
   } catch (error) {
-    if (signal?.aborted || isAbortError(error)) {
-      throw new Error('Request cancelled by user.');
-    }
     if (timeoutController.signal.aborted) {
       throw new Error(`Request timed out after ${Math.round(requestTimeoutMs / 1000)} seconds.`);
+    }
+    if (signal?.aborted || isAbortError(error)) {
+      throw new Error('Request cancelled by user.');
     }
     throw error;
   } finally {

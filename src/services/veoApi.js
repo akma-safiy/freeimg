@@ -4,7 +4,7 @@
 
 const API_BASE_URL = 'https://api.kie.ai/api/v1/veo';
 const JOBS_BASE_URL = 'https://api.kie.ai/api/v1/jobs';
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
 const DEFAULT_POLL_TIMEOUT_MS = 15 * 60_000;
 const ALLOWED_VIDEO_ASPECT_RATIOS = ['16:9', '9:16', 'Auto'];
@@ -15,7 +15,8 @@ const VIDEO_STATUS_ENDPOINTS = [
 ];
 
 const isAbortError = (error) => {
-  return error?.name === 'AbortError' || /aborted|cancelled/i.test(error?.message ?? '');
+  if (!error) return false;
+  return error.name === 'AbortError' || /aborted|cancelled/i.test(error.message ?? '');
 };
 
 /**
@@ -119,11 +120,11 @@ const requestJson = async (url, apiKey, options = {}) => {
 
     return await response.json();
   } catch (error) {
-    if (signal?.aborted || isAbortError(error)) {
-      throw new Error('Request cancelled by user.');
-    }
     if (timeoutController.signal.aborted) {
       throw new Error(`Request timed out after ${Math.round(requestTimeoutMs / 1000)} seconds.`);
+    }
+    if (signal?.aborted || isAbortError(error)) {
+      throw new Error('Request cancelled by user.');
     }
     throw error;
   } finally {

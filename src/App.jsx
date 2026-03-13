@@ -243,7 +243,9 @@ function App() {
   };
 
   const isAbortError = (err) => {
-    return err?.name === 'AbortError' || /aborted|cancelled/i.test(err?.message ?? '');
+    if (!err) return false;
+    if (err.name === 'AbortError') return true;
+    return /cancelled by user/i.test(err.message ?? '');
   };
 
   const clearPendingTaskStateReset = () => {
@@ -615,6 +617,7 @@ function App() {
   };
 
   const handleGenerate = async (options = {}) => {
+    if (isGenerating) return;
     const rerollFromPreferred = Boolean(options?.rerollFromPreferred);
     const preferredItem = rerollFromPreferred ? getPreferredResultItem() : null;
     const preferredImageUrl = preferredItem ? getResultImageUrl(preferredItem) : '';
@@ -762,6 +765,7 @@ function App() {
   };
 
   const handleVideoGenerate = async () => {
+    if (isGenerating) return;
     clearPendingTaskStateReset();
     setImageGenerationTimes([]);
     const key = apiKey.trim();
