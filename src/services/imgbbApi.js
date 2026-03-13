@@ -120,15 +120,16 @@ const uploadViaProxy = async (imageData, signal) => {
       if (data?.error) message = data.error;
     } catch { /* ignore */ }
 
-    if (response.status === 404) {
+    const keyDetected = !!(import.meta.env?.VITE_IMGBB_API_KEY);
+    if (response.status === 404 || response.status === 400) {
       throw new Error(
-        'Image upload endpoint not found. Note: Uploading via local proxy is not supported on static hosts like Netlify. Please set VITE_IMGBB_API_KEY in your Netlify Environment Variables to enable direct browser-side uploads.',
+        `Upload failed (${response.status}). Key detected: ${keyDetected}. Note: Local proxy is not supported on static hosts like Netlify. Ensure VITE_IMGBB_API_KEY (with VITE_ prefix) is set in Netlify settings and the site is redeployed.`,
       );
     }
 
     if (response.status === 500 && message.includes('not configured')) {
       throw new Error(
-        'Image upload is not configured. Add VITE_IMGBB_API_KEY to your .env file (get a free key at https://api.imgbb.com/) and restart the dev server.',
+        'Image upload is not configured. Add VITE_IMGBB_API_KEY to your .env file and restart the dev server.',
       );
     }
     throw new Error(message);
