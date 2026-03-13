@@ -19,6 +19,17 @@ const assertApiKey = (apiKey) => {
   }
 };
 
+/**
+ * Strips the literal string "null" that kie.ai sometimes sends as `msg`
+ * when there is no specific message, so the `|| fallback` logic works.
+ */
+const sanitizeApiMessage = (msg) => {
+  if (typeof msg !== 'string') return null;
+  const trimmed = msg.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'null') return null;
+  return trimmed;
+};
+
 const readErrorText = async (response) => {
   try {
     const text = await response.text();
@@ -138,7 +149,7 @@ export const createTask = async (
   });
 
   if (data?.code !== 200 || !data?.data?.taskId) {
-    throw new Error(data?.msg || 'Failed to create image task.');
+    throw new Error(sanitizeApiMessage(data?.msg) || 'Failed to create image task.');
   }
 
   return data.data.taskId;
@@ -189,7 +200,7 @@ export const pollTaskStatus = async (apiKey, taskId, onProgress, options = {}) =
     });
 
     if (response?.code !== 200) {
-      throw new Error(response?.msg || 'Failed to check image generation status.');
+      throw new Error(sanitizeApiMessage(response?.msg) || 'Failed to check image generation status.');
     }
 
     const taskData = response.data || {};
@@ -233,7 +244,7 @@ export const checkConnection = async (apiKey, options = {}) => {
   });
 
   if (data?.code !== 200) {
-    throw new Error(data?.msg || 'Connection test failed.');
+    throw new Error(sanitizeApiMessage(data?.msg) || 'Connection test failed.');
   }
 
   return data.data;

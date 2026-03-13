@@ -60,7 +60,7 @@ function App() {
 
   // Video Gen State
   const [videoPrompt, setVideoPrompt] = useState('A cinematic slow-motion pan showcasing the stunning fabric textures, natural lighting');
-  const [videoGenerationType, setVideoGenerationType] = useState('img2vid'); // 'img2vid' or 'ref2vid'
+  const [videoGenerationType, setVideoGenerationType] = useState('img2vid'); // 'text2vid', 'img2vid', or 'ref2vid'
   const [videoModel, setVideoModel] = useState('veo3_fast');
   const [videoAspectRatio, setVideoAspectRatio] = useState('16:9');
   const [videoResultUrl, setVideoResultUrl] = useState(null);
@@ -85,7 +85,7 @@ function App() {
 
   const MAX_FILE_SIZE_MB = 50;
   const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
-  const VIDEO_ASPECT_RATIOS = ['16:9', '9:16'];
+  const VIDEO_ASPECT_RATIOS = ['16:9', '9:16', 'Auto'];
   const generationControllerRef = useRef(null);
   const taskStateClearTimeoutRef = useRef(null);
 
@@ -773,15 +773,16 @@ function App() {
     // Constraints check
     if (videoGenerationType === 'img2vid') {
       if (images.length < 1 || images.length > 2) {
-        setError('Image-to-Video requires exactly 1 or 2 images (First & Last Frame).');
+        setError('Image-to-Video requires 1 or 2 images (First & Last Frame).');
         return;
       }
     } else if (videoGenerationType === 'ref2vid') {
-      if (images.length !== 3) {
-        setError('Reference-to-Video requires exactly 3 images.');
+      if (images.length < 1 || images.length > 3) {
+        setError('Reference-to-Video requires 1 to 3 images.');
         return;
       }
     }
+    // text2vid: no image constraint
 
     const normalizedVideoAspectRatio = VIDEO_ASPECT_RATIOS.includes(videoAspectRatio)
       ? videoAspectRatio
@@ -809,8 +810,11 @@ function App() {
 
       setTaskState('Initiating AI Video Synthesis...');
 
-      const apiGenType = videoGenerationType === 'img2vid' ? 'FIRST_AND_LAST_FRAMES_2_VIDEO' : 'REFERENCE_2_VIDEO';
-      const actualModel = videoGenerationType === 'ref2vid' ? 'veo3_fast' : videoModel; // ref2vid forces fast
+      const apiGenType =
+        videoGenerationType === 'img2vid' ? 'FIRST_AND_LAST_FRAMES_2_VIDEO' :
+        videoGenerationType === 'ref2vid' ? 'REFERENCE_2_VIDEO' :
+        'TEXT_2_VIDEO';
+      const actualModel = videoGenerationType === 'ref2vid' ? 'veo3_fast' : videoModel; // ref2vid forces fast model
 
       const taskId = await createVideoTask(
         key,
@@ -1097,6 +1101,12 @@ function App() {
             </div>
 
           {/* Video type info banners */}
+          {activeTab === 'video' && videoGenerationType === 'text2vid' && (
+            <div className="mejin-alert mejin-alert--info">
+              <Video className="w-4 h-4 mt-0.5 shrink-0" />
+              <span><strong>Text-to-Video:</strong> No images needed — describe the scene and Veo 3.1 will generate it from scratch.</span>
+            </div>
+          )}
           {activeTab === 'video' && videoGenerationType === 'img2vid' && (
             <div className="mejin-alert mejin-alert--info">
               <Video className="w-4 h-4 mt-0.5 shrink-0" />
@@ -1106,16 +1116,16 @@ function App() {
           {activeTab === 'video' && videoGenerationType === 'ref2vid' && (
             <div className="mejin-alert mejin-alert--info">
               <Video className="w-4 h-4 mt-0.5 shrink-0" />
-              <span><strong>Reference-to-Video:</strong> Requires exactly 3 reference images.</span>
+              <span><strong>Reference-to-Video:</strong> Requires 1 to 3 reference images. Fast model only.</span>
             </div>
           )}
           {activeTab === 'video' && Array.isArray(resultImages) && resultImages.length > 0 && (
-            <div className="mejin-alert mejin-alert--info" style={{justifyContent:'space-between'}}>
+            <div className="mejin-alert mejin-alert--info" style={{justifyContent:'space-between',flexWrap:'wrap',gap:'8px'}}>
               <span style={{fontSize:'0.8125rem'}}>Have generated layouts? Import your preferred one into Veo 3.1.</span>
                 <button
                   onClick={handleImportPreferredToVeo}
                   disabled={!hasPreferredResult}
-                  className="px-3 py-1.5 rounded-full font-bold disabled:opacity-40 disabled:cursor-not-allowed" style={{background:'rgba(79,139,255,0.15)',border:'1px solid rgba(79,139,255,0.3)',color:'#93c5fd'}}
+                  className="mejin-btn-primary text-xs px-4 py-2 rounded-full disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   Import Preferred
                 </button>
@@ -1631,19 +1641,23 @@ function App() {
                     <>
                       {/* Type */}
                       <div className="space-y-2 pt-2">
-                        <label className="text-xs font-bold uppercase tracking-wider ml-1" style={{color:'var(--text-muted)'}}>Generation Type</label>
-                        <div className="grid grid-cols-2 gap-3">
+                        <span className="section-label">Generation Type</span>
+                        <div className="grid grid-cols-3 gap-2">
+                          <button
+                            onClick={() => { setVideoGenerationType('text2vid'); }}
+                            className={`py-3 rounded-xl text-xs font-bold transition-all ${videoGenerationType === 'text2vid' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
+                          >
+                            Text to Video
+                          </button>
                           <button
                             onClick={() => { setVideoGenerationType('img2vid'); setVideoModel('veo3'); }}
-                            className={`py-4 md:py-3 rounded-2xl text-[15px] md:text-sm font-bold transition-all`}
-                            style={videoGenerationType === 'img2vid' ? {background:'var(--accent)',color:'#fff',border:'1px solid rgba(79,139,255,0.5)',boxShadow:'0 4px 12px var(--accent-glow)'} : {background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}
+                            className={`py-3 rounded-xl text-xs font-bold transition-all ${videoGenerationType === 'img2vid' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
                           >
                             Frames to Video
                           </button>
                           <button
                             onClick={() => { setVideoGenerationType('ref2vid'); setVideoModel('veo3_fast'); }}
-                            className={`py-4 md:py-3 rounded-2xl text-[15px] md:text-sm font-bold transition-all`}
-                            style={videoGenerationType === 'ref2vid' ? {background:'var(--accent)',color:'#fff',border:'1px solid rgba(79,139,255,0.5)',boxShadow:'0 4px 12px var(--accent-glow)'} : {background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}
+                            className={`py-3 rounded-xl text-xs font-bold transition-all ${videoGenerationType === 'ref2vid' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
                           >
                             Reference to Video
                           </button>
@@ -1651,35 +1665,32 @@ function App() {
                       </div>
 
                       {/* Prompt */}
-                      <div className="space-y-2 mt-4">
-                        <label className="text-xs font-bold uppercase tracking-wider ml-1" style={{color:'var(--text-muted)'}}>Video Scene Prompt</label>
+                      <div className="space-y-2 mt-3">
+                        <span className="section-label">Video Scene Prompt</span>
                         <textarea
                           value={videoPrompt}
                           onChange={(e) => setVideoPrompt(e.target.value)}
                           rows={3}
                           placeholder="Describe the motion, action, and scene..."
-                          className="w-full rounded-2xl px-5 py-4 text-base transition-all resize-none"
-                          style={{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text)'}}
+                          className="mejin-textarea w-full px-4 py-3"
                         />
                       </div>
 
                       {/* Model & Aspect Ratio */}
-                      <div className="grid grid-cols-2 gap-6 pt-2">
+                      <div className="grid grid-cols-2 gap-4 pt-2">
                         <div className="space-y-2">
-                          <label className="text-xs font-bold uppercase tracking-wider ml-1" style={{color:'var(--text-muted)'}}>Veo Model</label>
+                          <span className="section-label">Veo Model</span>
                           <div className="grid grid-cols-2 gap-2">
                             <button
                               onClick={() => setVideoModel('veo3')}
                               disabled={videoGenerationType === 'ref2vid'}
-                              className="py-3 md:py-2 px-1 rounded-xl text-xs sm:text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                              style={videoModel === 'veo3' ? {background:'var(--accent)',color:'#fff',border:'1px solid rgba(79,139,255,0.5)'} : {background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}
+                              className={`py-2 rounded-xl text-xs font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed ${videoModel === 'veo3' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
                             >
                               Veo 3
                             </button>
                             <button
                               onClick={() => setVideoModel('veo3_fast')}
-                              className="py-3 md:py-2 px-1 rounded-xl text-xs sm:text-sm font-bold transition-all"
-                              style={videoModel === 'veo3_fast' ? {background:'var(--accent)',color:'#fff',border:'1px solid rgba(79,139,255,0.5)'} : {background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}
+                              className={`py-2 rounded-xl text-xs font-bold transition-all ${videoModel === 'veo3_fast' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
                             >
                               Veo 3 Fast
                             </button>
@@ -1687,14 +1698,13 @@ function App() {
                         </div>
 
                         <div className="space-y-2">
-                          <label className="text-xs font-bold uppercase tracking-wider ml-1" style={{color:'var(--text-muted)'}}>Format</label>
+                          <span className="section-label">Format</span>
                           <div className="grid grid-cols-2 gap-2">
                             {VIDEO_ASPECT_RATIOS.map((ratio) => (
                               <button
                                 key={ratio}
                                 onClick={() => setVideoAspectRatio(ratio)}
-                                className="py-3 md:py-2 px-1 rounded-xl text-xs sm:text-sm font-bold transition-all"
-                                style={videoAspectRatio === ratio ? {background:'var(--accent)',color:'#fff',border:'1px solid rgba(79,139,255,0.5)'} : {background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}
+                                className={`py-2 rounded-xl text-xs font-bold transition-all ${videoAspectRatio === ratio ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
                               >
                                 {ratio}
                               </button>
@@ -1713,7 +1723,7 @@ function App() {
           <div className="w-full">
             <button
               onClick={activeTab === 'image' ? handleGenerate : handleVideoGenerate}
-              disabled={isGenerating || images.length === 0}
+              disabled={isGenerating || (activeTab === 'video' && videoGenerationType !== 'text2vid' && images.length === 0) || (activeTab === 'image' && images.length === 0)}
               className="mejin-btn-primary w-full rounded-2xl py-4 px-6 flex flex-col items-center justify-center glow-pulse"
               style={{minHeight:'60px'}}
             >

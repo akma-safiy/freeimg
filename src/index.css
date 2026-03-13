@@ -1,49 +1,54 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Outfit:wght@400;600;700;800;900&display=swap");
+/* Helvetica is a system font — no external import needed */
 @import "tailwindcss";
 
 /* ════════════════════════════════════════════════════
-   MEJIN DESIGN TOKENS — PREMIUM LIGHT THEME
+   MEJIN DESIGN TOKENS — CHATGPT DARK THEME
    Based on 8pt grid system
 ════════════════════════════════════════════════════ */
 :root {
-  /* ── Backgrounds ── */
-  --bg-base:        #F0F4FF;
-  --bg-surface:     #FFFFFF;
-  --bg-elevated:    #FFFFFF;
-  --bg-overlay:     rgba(15, 23, 42, 0.55);
+  /* ── Backgrounds (ChatGPT dark scale) ── */
+  --bg-base:        #212121;
+  --bg-surface:     #2f2f2f;
+  --bg-elevated:    #404040;
+  --bg-overlay:     rgba(0, 0, 0, 0.70);
 
   /* ── Brand / Primary ── */
   --primary:        #2563EB;
   --primary-light:  #3B82F6;
   --primary-dark:   #1D4ED8;
-  --primary-soft:   rgba(37, 99, 235, 0.10);
-  --primary-glow:   rgba(37, 99, 235, 0.25);
+  --primary-soft:   rgba(37, 99, 235, 0.18);
+  --primary-glow:   rgba(37, 99, 235, 0.30);
+
+  /* ── Accent (secondary highlight) ── */
+  --accent:         #10a37f;
+  --accent-2:       #1aba8e;
 
   /* ── Text ── */
-  --text:           #0F172A;
-  --text-secondary: #475569;
-  --text-muted:     #94A3B8;
-  --text-inverse:   #FFFFFF;
+  --text:           #ececec;
+  --text-secondary: #b4b4b4;
+  --text-muted:     #8c8c8c;
+  --text-soft:      #c4c4c4;
+  --text-inverse:   #0F172A;
 
   /* ── Borders ── */
-  --border:         #E2E8F0;
-  --border-strong:  #CBD5E1;
+  --border:         rgba(255, 255, 255, 0.10);
+  --border-strong:  rgba(255, 255, 255, 0.18);
   --border-focus:   #2563EB;
 
   /* ── Status colors ── */
-  --success:        #10B981;
-  --success-soft:   rgba(16,185,129,0.10);
-  --danger:         #EF4444;
-  --danger-soft:    rgba(239,68,68,0.10);
-  --warning:        #F59E0B;
+  --success:        #34d399;
+  --success-soft:   rgba(52,211,153,0.12);
+  --danger:         #f87171;
+  --danger-soft:    rgba(248,113,113,0.12);
+  --warning:        #fbbf24;
 
-  /* ── Shadows (layered for depth) ── */
-  --shadow-xs:      0 1px 2px rgba(15,23,42,0.06);
-  --shadow-sm:      0 2px 8px rgba(15,23,42,0.08), 0 1px 2px rgba(15,23,42,0.04);
-  --shadow-md:      0 4px 16px rgba(15,23,42,0.10), 0 2px 4px rgba(15,23,42,0.06);
-  --shadow-lg:      0 8px 32px rgba(15,23,42,0.12), 0 4px 8px rgba(15,23,42,0.06);
-  --shadow-xl:      0 16px 48px rgba(15,23,42,0.14), 0 8px 16px rgba(15,23,42,0.06);
-  --shadow-primary: 0 8px 24px rgba(37,99,235,0.30);
+  /* ── Shadows (darkened for dark theme) ── */
+  --shadow-xs:      0 1px 3px rgba(0,0,0,0.30);
+  --shadow-sm:      0 2px 8px rgba(0,0,0,0.35), 0 1px 2px rgba(0,0,0,0.20);
+  --shadow-md:      0 4px 16px rgba(0,0,0,0.40), 0 2px 4px rgba(0,0,0,0.20);
+  --shadow-lg:      0 8px 32px rgba(0,0,0,0.45), 0 4px 8px rgba(0,0,0,0.20);
+  --shadow-xl:      0 16px 48px rgba(0,0,0,0.50), 0 8px 16px rgba(0,0,0,0.25);
+  --shadow-primary: 0 8px 24px rgba(37,99,235,0.35);
 
   /* ── Spacing (8pt scale) ── */
   --space-1:  4px;
@@ -73,9 +78,9 @@
   --ease-out:    cubic-bezier(0.25, 0.46, 0.45, 0.94);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 
-  /* ── Typography ── */
-  font-family: "Inter", "Segoe UI", -apple-system, sans-serif;
-  --font-display: "Outfit", "Inter", sans-serif;
+  /* ── Typography — Helvetica ── */
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-display: "Helvetica Neue", Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
   color: var(--text);
@@ -143,11 +148,11 @@ input, textarea, select {
   position: sticky;
   top: 0;
   z-index: 50;
-  background: rgba(255, 255, 255, 0.90);
+  background: rgba(33, 33, 33, 0.92);
   border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
-  box-shadow: var(--shadow-xs);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.06);
 }
 
 /* ════════════════════════════════════════════════ */
@@ -458,11 +463,11 @@ input, textarea, select {
   left: 0;
   right: 0;
   z-index: 50;
-  background: rgba(255, 255, 255, 0.95);
+  background: rgba(33, 33, 33, 0.95);
   border-top: 1px solid var(--border);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
-  box-shadow: 0 -4px 24px rgba(15,23,42,0.08);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: 0 -1px 0 rgba(255,255,255,0.06);
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
@@ -731,9 +736,9 @@ input, textarea, select {
   line-height: 1.5;
 }
 
-.mejin-alert--info    { background: var(--primary-soft); color: var(--primary-dark); border: 1px solid rgba(37,99,235,0.15); }
-.mejin-alert--error   { background: var(--danger-soft);  color: #B91C1C;             border: 1px solid rgba(239,68,68,0.15); }
-.mejin-alert--success { background: var(--success-soft); color: #065F46;             border: 1px solid rgba(16,185,129,0.15); }
+.mejin-alert--info    { background: rgba(37,99,235,0.12);  color: #93c5fd; border: 1px solid rgba(37,99,235,0.25); }
+.mejin-alert--error   { background: rgba(248,113,113,0.12); color: #fca5a5; border: 1px solid rgba(248,113,113,0.25); }
+.mejin-alert--success { background: rgba(52,211,153,0.12);  color: #6ee7b7; border: 1px solid rgba(52,211,153,0.25); }
 
 /* ════════════════════════════════════════════════ */
 /* MODAL OVERLAY                                    */

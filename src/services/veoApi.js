@@ -7,15 +7,55 @@ const JOBS_BASE_URL = 'https://api.kie.ai/api/v1/jobs';
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
 const DEFAULT_POLL_TIMEOUT_MS = 15 * 60_000;
-const ALLOWED_VIDEO_ASPECT_RATIOS = ['16:9', '9:16'];
+const ALLOWED_VIDEO_ASPECT_RATIOS = ['16:9', '9:16', 'Auto'];
+const VIDEO_STATUS_ENDPOINTS = [
+  (encodedTaskId) => `${API_BASE_URL}/record-info?taskId=${encodedTaskId}`,
+  (encodedTaskId) => `${API_BASE_URL}/recordInfo?taskId=${encodedTaskId}`,
+  (encodedTaskId) => `${JOBS_BASE_URL}/recordInfo?taskId=${encodedTaskId}`,
+];
 
 const isAbortError = (error) => {
   return error?.name === 'AbortError' || /aborted|cancelled/i.test(error?.message ?? '');
 };
 
+/**
+ * Some kie.ai endpoints return the JSON literal string "null" as the `msg`
+ * field when they have no specific message to send. Strip those so the
+ * `|| fallback` logic works correctly.
+ */
+const sanitizeApiMessage = (msg) => {
+  if (typeof msg !== 'string') return null;
+  const trimmed = msg.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'null') return null;
+  return trimmed;
+};
+
 const isTransientError = (error) => {
   const message = error?.message ?? '';
-  return /timed out|network|failed to fetch|502|503|504/i.test(message);
+  return /timed out|network|failed to fetch|429|500|502|503|504/i.test(message);
+};
+
+const isRecordInfoPendingError = (value) => {
+  const message = typeof value === 'string' ? value : (value?.message ?? '');
+  return /record\s*(?:info)?\s*is\s*null|recordinfo\s*is\s*null|record\s*result\s*data\s*is\s*blank/i.test(message);
+};
+
+const isRecordEndpointMissingError = (value) => {
+  const message = typeof value === 'string' ? value : (value?.message ?? '');
+  return /API Error \(404\)|Cannot (GET|POST)|route not found|path not found/i.test(message);
+};
+
+const parseJsonObject = (value) => {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
 };
 
 const sleep = (ms, signal) => {
@@ -97,10 +137,10 @@ const requestJson = async (url, apiKey, options = {}) => {
  *
  * @param {string} apiKey User's API Key
  * @param {string} prompt The text prompt
- * @param {Array<string>} imageUrls Array of image URLs (1-2 for img2vid, 3 for ref2vid)
- * @param {string} generationType 'FIRST_AND_LAST_FRAMES_2_VIDEO' or 'REFERENCE_2_VIDEO'
+ * @param {string[]} imageUrls Image URLs (0 for text2vid, 1-2 for img2vid, 1-3 for ref2vid)
+ * @param {string} generationType 'TEXT_2_VIDEO', 'FIRST_AND_LAST_FRAMES_2_VIDEO', or 'REFERENCE_2_VIDEO'
  * @param {string} model 'veo3' or 'veo3_fast'
- * @param {string} aspectRatio '16:9' or '9:16'
+ * @param {string} aspectRatio '16:9', '9:16', or 'Auto'
  * @param {{ signal?: AbortSignal, requestTimeoutMs?: number }} options
  * @returns {Promise<string>} The taskId
  */
@@ -117,25 +157,30 @@ export const createVideoTask = async (
     throw new Error('Reference to Video only supports the veo3_fast model.');
   }
 
-  if (generationType === 'REFERENCE_2_VIDEO' && imageUrls.length !== 3) {
-    throw new Error('Reference to Video requires exactly 3 images.');
+  if (generationType === 'REFERENCE_2_VIDEO' && (imageUrls.length < 1 || imageUrls.length > 3)) {
+    throw new Error('Reference to Video requires 1 to 3 images.');
   }
 
   if (generationType === 'FIRST_AND_LAST_FRAMES_2_VIDEO' && (imageUrls.length < 1 || imageUrls.length > 2)) {
     throw new Error('Image to Video requires 1 or 2 images.');
   }
 
+  if (generationType === 'TEXT_2_VIDEO' && imageUrls.length > 0) {
+    // The API ignores imageUrls in text-to-video mode, but keep the check
+    // clean – we just omit the field rather than sending an empty array.
+  }
+
   if (!ALLOWED_VIDEO_ASPECT_RATIOS.includes(aspectRatio)) {
-    throw new Error('Invalid video aspect ratio. Allowed values: 16:9 or 9:16.');
+    throw new Error(`Invalid video aspect ratio. Allowed values: ${ALLOWED_VIDEO_ASPECT_RATIOS.join(', ')}.`);
   }
 
   const payload = {
     prompt,
-    imageUrls,
     model,
     aspect_ratio: aspectRatio,
     generationType,
     enableTranslation: true,
+    ...(imageUrls.length > 0 && { imageUrls }),
   };
 
   const data = await requestJson(`${API_BASE_URL}/generate`, apiKey, {
@@ -145,7 +190,8 @@ export const createVideoTask = async (
   });
 
   if (data?.code !== 200 || !data?.data?.taskId) {
-    throw new Error(data?.msg || 'Failed to create video task.');
+    const reason = sanitizeApiMessage(data?.msg);
+    throw new Error(reason || `Failed to create video task (code: ${data?.code ?? 'unknown'}). Check that your API key has Veo 3.1 access.`);
   }
 
   return data.data.taskId;
@@ -153,42 +199,143 @@ export const createVideoTask = async (
 
 const getVideoStatus = async (apiKey, taskId, options) => {
   const encodedTaskId = encodeURIComponent(taskId);
-  try {
-    return await requestJson(`${API_BASE_URL}/recordInfo?taskId=${encodedTaskId}`, apiKey, options);
-  } catch (error) {
-    if (!/API Error \(404\)/.test(error?.message ?? '')) {
+
+  let pendingError = null;
+  let endpointMissingError = null;
+
+  for (const endpointBuilder of VIDEO_STATUS_ENDPOINTS) {
+    try {
+      const response = await requestJson(endpointBuilder(encodedTaskId), apiKey, options);
+      if (response?.code === 200) {
+        return response;
+      }
+
+      if (isRecordInfoPendingError(response?.msg)) {
+        pendingError = new Error(response.msg || 'recordInfo is null');
+        continue;
+      }
+
+      if (isRecordEndpointMissingError(response?.msg)) {
+        endpointMissingError = new Error(response.msg || 'Status endpoint is unavailable.');
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      if (isRecordInfoPendingError(error)) {
+        pendingError = error;
+        continue;
+      }
+
+      if (isRecordEndpointMissingError(error)) {
+        endpointMissingError = error;
+        continue;
+      }
+
       throw error;
     }
-
-    return requestJson(`${JOBS_BASE_URL}/recordInfo?taskId=${encodedTaskId}`, apiKey, options);
   }
+
+  if (pendingError) {
+    throw pendingError;
+  }
+
+  if (endpointMissingError) {
+    throw endpointMissingError;
+  }
+
+  throw new Error('Failed to check video generation status.');
 };
 
 const extractVideoResultUrl = (taskData) => {
   const candidates = [];
 
+  const parsedResponse = parseJsonObject(taskData?.response);
+  if (parsedResponse) {
+    candidates.push(parsedResponse);
+  }
+
   if (taskData?.resultJson) {
-    try {
-      const parsed = JSON.parse(taskData.resultJson);
+    const parsed = parseJsonObject(taskData.resultJson);
+    if (parsed) {
       candidates.push(parsed);
-    } catch {
-      // Ignore malformed JSON and continue with other candidates.
     }
   }
 
-  if (taskData?.info) {
-    candidates.push(taskData.info);
+  const parsedInfo = parseJsonObject(taskData?.info);
+  if (parsedInfo) {
+    candidates.push(parsedInfo);
   }
 
   candidates.push(taskData);
 
   for (const candidate of candidates) {
-    if (candidate?.resultUrls?.length) return candidate.resultUrls[0];
-    if (typeof candidate?.resultUrl === 'string') return candidate.resultUrl;
-    if (typeof candidate?.url === 'string') return candidate.url;
+    const nestedResponse = parseJsonObject(candidate?.response);
+    const resultContainers = [candidate, nestedResponse];
+
+    for (const container of resultContainers) {
+      if (!container) continue;
+
+      const primaryResultUrl = Array.isArray(container?.resultUrls) ? container.resultUrls.find((url) => typeof url === 'string') : null;
+      if (primaryResultUrl) return primaryResultUrl;
+      if (typeof container?.resultUrl === 'string') return container.resultUrl;
+      if (typeof container?.url === 'string') return container.url;
+    }
   }
 
   return null;
+};
+
+const normalizeVideoState = (taskData) => {
+  if (typeof taskData?.state === 'string' && taskData.state.trim()) {
+    return taskData.state.trim().toLowerCase();
+  }
+
+  const successFlag = Number(taskData?.successFlag);
+  if (Number.isFinite(successFlag)) {
+    if (successFlag === 1) return 'success';
+    if (successFlag === 2 || successFlag === 3) return 'failed';
+    return 'pending';
+  }
+
+  return 'pending';
+};
+
+const normalizeNumericValue = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
+
+const extractVideoProgress = (taskData) => {
+  const parsedResponse = parseJsonObject(taskData?.response);
+  return normalizeNumericValue(taskData?.progress) ?? normalizeNumericValue(parsedResponse?.progress);
+};
+
+const extractVideoFailureMessage = (taskData) => {
+  const parsedResponse = parseJsonObject(taskData?.response);
+  const messageCandidates = [
+    taskData?.failMsg,
+    taskData?.errorMessage,
+    parsedResponse?.failMsg,
+    parsedResponse?.errorMessage,
+    parsedResponse?.message,
+  ];
+
+  for (const message of messageCandidates) {
+    if (typeof message === 'string' && message.trim()) {
+      return message;
+    }
+  }
+
+  return 'Video task failed on server.';
+};
+
+const createPendingTimeoutError = (timeoutMs) => {
+  return new Error(`Video generation is still pending after ${Math.round(timeoutMs / 1000)} seconds. Please try again.`);
 };
 
 /**
@@ -227,6 +374,15 @@ export const pollVideoStatus = async (apiKey, taskId, onProgress, options = {}) 
       const elapsedMs = Date.now() - startedAt;
       const isFinalAttempt = attempt === maxAttempts || elapsedMs >= timeoutMs;
 
+      if (isRecordInfoPendingError(error)) {
+        if (!isFinalAttempt) {
+          onProgress?.('retrying', null, attempt);
+          await sleep(pollIntervalMs, signal);
+          continue;
+        }
+        throw createPendingTimeoutError(timeoutMs);
+      }
+
       if (!isFinalAttempt && isTransientError(error)) {
         onProgress?.('retrying', null, attempt);
         await sleep(pollIntervalMs, signal);
@@ -237,12 +393,25 @@ export const pollVideoStatus = async (apiKey, taskId, onProgress, options = {}) 
     }
 
     if (response?.code !== 200) {
-      throw new Error(response?.msg || 'Failed to check video generation status.');
+      const responseErrorMessage = sanitizeApiMessage(response?.msg) || 'Failed to check video generation status.';
+      const elapsedMs = Date.now() - startedAt;
+      const isFinalAttempt = attempt === maxAttempts || elapsedMs >= timeoutMs;
+
+      if (isRecordInfoPendingError(responseErrorMessage)) {
+        if (!isFinalAttempt) {
+          onProgress?.('pending', null, attempt);
+          await sleep(pollIntervalMs, signal);
+          continue;
+        }
+        throw createPendingTimeoutError(timeoutMs);
+      }
+
+      throw new Error(responseErrorMessage);
     }
 
     const taskData = response.data || {};
-    const state = taskData.state || 'unknown';
-    const progress = typeof taskData.progress === 'number' ? taskData.progress : null;
+    const state = normalizeVideoState(taskData);
+    const progress = extractVideoProgress(taskData);
     onProgress?.(state, progress, attempt);
 
     if (state === 'success') {
@@ -254,7 +423,7 @@ export const pollVideoStatus = async (apiKey, taskId, onProgress, options = {}) 
     }
 
     if (state === 'fail' || state === 'failed') {
-      throw new Error(taskData.failMsg || 'Video task failed on server.');
+      throw new Error(extractVideoFailureMessage(taskData));
     }
 
     const elapsedMs = Date.now() - startedAt;
