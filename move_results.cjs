@@ -1,5 +1,5 @@
 const fs = require('fs');
-const filePath = 'c:/Users/muhdk/.gemini/antigravity/scratch/ai-outfit-generator/src/App.jsx';
+const filePath = 'c:/Users/muhdk/.gemini/antigravity/scratch/mejin-apps/src/App.jsx';
 
 const content = fs.readFileSync(filePath, 'utf-8');
 let lines = content.split('\n');

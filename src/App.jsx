@@ -5,7 +5,7 @@ import { createVideoTask, pollVideoStatus } from './services/veoApi';
 import { uploadImageToHost } from './services/imgbbApi';
 import { generatePromptsWithGpt52 } from './services/gpt5Api';
 
-const DEFAULT_IMAGE_PROMPT = 'A highly detailed cinematic shot of the outfit in a neon-lit cyberpunk city street';
+const DEFAULT_IMAGE_PROMPT = '';
 const DEFAULT_VARIATION_PROMPTS = [
   "Pose 1: Standing straight, maintain camera angle, setting, and outfit",
   "Pose 2: Hands on hips, casual stance, maintain camera angle, setting, and outfit",
@@ -44,6 +44,7 @@ function App() {
   const [mainTab, setMainTab] = useState('home'); // 'home', 'history', 'settings'
   const [activeTab, setActiveTab] = useState('image'); // 'image' or 'video'
   const [mobileView, setMobileView] = useState('controls'); // 'controls' or 'preview'
+  const [isDragging, setIsDragging] = useState(false);
 
   // Image Gen State
   const [images, setImages] = useState([]);
@@ -416,6 +417,39 @@ function App() {
     }
   }, []);
 
+  // ── Auto-analyze: when images are uploaded, let GPT-5.2 detect the product and fill the prompt ──
+  useEffect(() => {
+    const key = apiKey.trim();
+    if (!key || images.length === 0 || isAnalyzingSuggestions || activeTab !== 'image') return;
+    const timer = setTimeout(() => {
+      handleAnalyzePrompt();
+    }, 1200);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [images.length, activeTab]);
+
+  /**
+   * Compress a data URI to max 1280px on the longest side at JPEG 85%.
+   * This keeps file size under ~500 KB for typical phone photos, preventing
+   * ImgBB / FreeImage "File too big" (32 MB) upload errors.
+   */
+  const compressDataUrl = (dataUrl, maxDim = 1280, quality = 0.85) => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const { naturalWidth: w, naturalHeight: h } = img;
+        const scale = Math.min(1, maxDim / Math.max(w, h));
+        const cw = Math.round(w * scale);
+        const ch = Math.round(h * scale);
+        const canvas = Object.assign(document.createElement('canvas'), { width: cw, height: ch });
+        canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => resolve(dataUrl); // fall back to original on error
+      img.src = dataUrl;
+    });
+  };
+
   const handleAnalyzePrompt = async () => {
     if (images.length === 0) {
       setError('Please upload at least one image before analyzing.');
@@ -435,7 +469,8 @@ function App() {
       const hostedImageUrls = await Promise.all(
         images.map(async (img) => {
           if (img.isLocal || img.url.startsWith('data:')) {
-            return await uploadImageToHost(img.url);
+            const compressed = await compressDataUrl(img.url);
+            return await uploadImageToHost(compressed);
           }
           return img.url;
         })
@@ -668,8 +703,9 @@ function App() {
       const imageUrls = [];
       for (const img of sourceImages) {
         if (img.isLocal || img.url.startsWith('data:')) {
-          setTaskState('Uploading local image to secure host...');
-          const remoteUrl = await uploadImageToHost(img.url, { signal: controller.signal });
+          setTaskState('Compressing and uploading image...');
+          const compressed = await compressDataUrl(img.url);
+          const remoteUrl = await uploadImageToHost(compressed, { signal: controller.signal });
           imageUrls.push(remoteUrl);
         } else {
           imageUrls.push(img.url);
@@ -1056,7 +1092,7 @@ function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 sm:gap-4 text-sm font-medium">
+        <div className="flex items-center gap-2 sm:gap-4 text-sm font-medium">
             <div className="mejin-segment-shell rounded-full p-1 flex items-center">
               <button
                 onClick={() => {
@@ -1064,11 +1100,9 @@ function App() {
                   setMainTab('home');
                   setMobileView('controls');
                 }}
-                className={`mejin-segment-btn px-3 sm:px-6 py-2.5 rounded-full transition-all flex items-center gap-1.5 sm:gap-2 font-medium text-xs sm:text-sm ${activeTab === 'image' ? 'mejin-segment-btn--active' : 'mejin-segment-btn--idle'}`}
+                className={`mejin-segment-btn px-4 sm:px-7 py-2 rounded-full transition-all flex items-center justify-center font-semibold text-sm ${activeTab === 'image' ? 'mejin-segment-btn--active' : 'mejin-segment-btn--idle'}`}
               >
-                <ImageIcon className="w-4 h-4" />
-                <span className="hidden sm:inline">Outfit Image</span>
-                <span className="sm:hidden">Image</span>
+                Image
               </button>
               <button
                 onClick={() => {
@@ -1076,11 +1110,9 @@ function App() {
                   setMainTab('home');
                   setMobileView('controls');
                 }}
-                className={`mejin-segment-btn px-3 sm:px-6 py-2.5 rounded-full transition-all flex items-center gap-1.5 sm:gap-2 font-medium text-xs sm:text-sm ${activeTab === 'video' ? 'mejin-segment-btn--active' : 'mejin-segment-btn--idle'}`}
+                className={`mejin-segment-btn px-4 sm:px-7 py-2 rounded-full transition-all flex items-center justify-center font-semibold text-sm ${activeTab === 'video' ? 'mejin-segment-btn--active' : 'mejin-segment-btn--idle'}`}
               >
-                <Video className="w-4 h-4" />
-                <span className="hidden sm:inline">Veo 3.1 Video</span>
-                <span className="sm:hidden">Video</span>
+                Video
               </button>
             </div>
           </div>
@@ -1136,630 +1168,507 @@ function App() {
               </div>
             )}
 
-          {/* Main Upload Card */}
-          <div className="mejin-panel p-5 flex flex-col gap-5">
-            {/* Image Sources */}
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center justify-between">
-                <span className="section-label">Upload Images</span>
-                <span className="mejin-badge mejin-badge--blue">{images.length} / {MAX_IMAGES}</span>
-              </div>
-
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-                    <ImageIcon className="h-4 w-4" style={{color:'var(--text-muted)'}} />
-                  </div>
-                  <input
-                    type="text"
-                    value={urlInput}
-                    onChange={(e) => setUrlInput(e.target.value)}
-                    onPaste={handleUrlInputPaste}
-                    onKeyDown={(e) => e.key === 'Enter' && handleAddUrl()}
-                    placeholder="Paste image URL…"
-                    className="mejin-input w-full pl-9 pr-3 py-3 text-sm"
-                  />
+          {/* Main Unified Generation Panel */}
+          <div
+            className={`gen-panel p-5 flex flex-col gap-4`}
+            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragging(false);
+              const files = Array.from(e.dataTransfer.files ?? []);
+              if (files.length > 0) {
+                const syntheticEvent = { target: { files } };
+                handleFileUpload(syntheticEvent);
+              }
+            }}
+          >
+            {/* Upload Drop Zone */}
+            <div
+              className={`upload-drop-zone ${isDragging ? 'upload-drop-zone--active' : ''}`}
+              onClick={() => fileInputRef.current?.click()}
+              style={{ minHeight: images.length > 0 ? 'auto' : '80px' }}
+            >
+              <div className="flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
+                <Plus className="w-5 h-5" style={{ color: 'var(--primary)' }} />
+                <div className="text-left">
+                  <p className="text-sm font-600" style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>
+                    Upload / Paste / Drag Images
+                  </p>
+                  <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                    Click to browse · Ctrl+V to paste · Drop files here
+                  </p>
                 </div>
-                <button
-                  onClick={() => { if (urlInput.trim()) { handleAddUrl(); } else { fileInputRef.current?.click(); } }}
-                  disabled={images.length >= MAX_IMAGES}
-                  className="mejin-btn-primary rounded-xl flex items-center justify-center"
-                  style={{ width: '48px', height: '48px', flexShrink: 0 }}
-                  aria-label="Add image"
-                >
-                  <Plus className="w-5 h-5" />
-                </button>
+                <span className="ml-auto mejin-badge mejin-badge--blue" style={{ whiteSpace: 'nowrap' }}>
+                  {images.length} / {MAX_IMAGES}
+                </span>
               </div>
-              <p className="text-xs" style={{color:'var(--text-muted)'}}>Tip: paste (Ctrl+V) a screenshot directly, or click + to browse files.</p>
-
-              <input
-                type="file"
-                multiple
-                accept="image/*"
-                className="hidden"
-                ref={fileInputRef}
-                onChange={handleFileUpload}
-                disabled={images.length >= MAX_IMAGES}
-              />
-
-              {/* Thumbnails grid */}
-              {images.length > 0 && (
-                <div className="grid grid-cols-3 gap-2 mt-1">
-                  {images.map((img) => (
-                    <div
-                      key={img.id}
-                      className="relative group rounded-xl overflow-hidden cursor-pointer card-lift"
-                      style={{aspectRatio:'1',background:'var(--bg-base)',border:'1.5px solid var(--border)'}}
-                      onClick={() => setEnlargedImage(img.url)}
-                    >
-                      <img src={img.url} alt="Upload preview" className="w-full h-full object-cover" />
-                      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity" style={{background:'rgba(15,23,42,0.45)'}}>
-                        <Eye className="w-5 h-5 text-white" />
-                      </div>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); removeImage(img.id); }}
-                        className="absolute top-1.5 right-1.5 rounded-full p-1 flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
-                        style={{background:'var(--danger)',minWidth:'22px',minHeight:'22px'}}
-                        aria-label="Remove image"
-                      >
-                        <X className="w-3 h-3 text-white" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
-          </div>
-          {/* Prompt & Config card is further below */}
 
-          {/* Home Tab: Results Area */}
+            {/* Thumbnail previews */}
+            {images.length > 0 && (
+              <div className="grid grid-cols-4 gap-2">
+                {images.map((img) => (
+                  <div
+                    key={img.id}
+                    className="relative group rounded-xl overflow-hidden cursor-pointer card-lift"
+                    style={{ aspectRatio: '1', background: 'var(--bg-surface)', border: '1.5px solid var(--border)' }}
+                    onClick={() => setEnlargedImage(img.url)}
+                  >
+                    <img src={img.url} alt="Upload preview" className="w-full h-full object-cover" />
+                    <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity" style={{ background: 'rgba(15,17,21,0.5)' }}>
+                      <Eye className="w-4 h-4 text-white" />
+                    </div>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); removeImage(img.id); }}
+                      className="absolute top-1 right-1 rounded-full p-1 flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
+                      style={{ background: 'var(--danger)', minWidth: '20px', minHeight: '20px' }}
+                      aria-label="Remove image"
+                    >
+                      <X className="w-2.5 h-2.5 text-white" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* URL Paste Row */}
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <input
+                  type="text"
+                  value={urlInput}
+                  onChange={(e) => setUrlInput(e.target.value)}
+                  onPaste={handleUrlInputPaste}
+                  onKeyDown={(e) => e.key === 'Enter' && handleAddUrl()}
+                  placeholder="Paste image URL…"
+                  className="mejin-input w-full pl-4 pr-3 py-2.5 text-sm"
+                />
+              </div>
+              <button
+                onClick={() => { if (urlInput.trim()) { handleAddUrl(); } }}
+                disabled={!urlInput.trim() || images.length >= MAX_IMAGES}
+                className="mejin-btn-secondary rounded-xl text-xs font-bold px-4 py-2.5 disabled:opacity-40"
+              >
+                Add
+              </button>
+            </div>
+
+            <input
+              type="file"
+              multiple
+              accept="image/*"
+              className="hidden"
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+              disabled={images.length >= MAX_IMAGES}
+            />
+
+          </div>{/* end gen-panel upload section */}
+
+
+          {/* Results / Loading — shown ABOVE the upload panel */}
         {mainTab === 'home' && (isGenerating || currentResultValid) && (
-          <div className="flex flex-col w-full max-w-xl mx-auto mt-4 px-2" style={{height:'80vh',maxHeight:'820px'}}>
-            <div className="mejin-stage relative flex-1 rounded-[1.5rem] sm:rounded-[2.5rem] flex items-start justify-center p-2 sm:p-4 overflow-hidden">
+          <div className="flex flex-col w-full gap-3">
+            {/* ── GENERATING STATE: minimal shimmer ── */}
+            {isGenerating && (
+              <div className="gen-panel p-4 flex flex-col gap-3">
+                {/* Status row */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: 'var(--primary)' }} />
+                    <span className="text-xs font-semibold" style={{ color: 'var(--text-secondary)' }}>
+                      Generating · {formatElapsedClock(elapsedSeconds)}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => { generationControllerRef.current?.abort(); setTaskState('Cancelling...'); }}
+                    className="text-xs font-bold px-3 py-1 rounded-full"
+                    style={{ background: 'rgba(239,68,68,0.12)', color: '#f87171', border: '1px solid rgba(239,68,68,0.2)' }}
+                  >
+                    Cancel
+                  </button>
+                </div>
 
-
-
-              {isGenerating && (
-                <div className="absolute inset-0 z-30 flex items-center justify-center backdrop-blur-xl transition-opacity duration-700" style={{background:'rgba(6,8,17,0.8)'}}>
-                  {hasLoadingBlendImages && (
-                    <div
-                      className="absolute inset-0 opacity-55"
-                      style={{
-                        backgroundImage: `url(${loadingCurrentImageUrl || images[0]?.url || ''})`,
-                        backgroundSize: 'cover',
-                        backgroundPosition: 'center',
-                        filter: 'blur(44px) saturate(0.7)',
-                        transform: `scale(${1.08 + loadingBlendRatio * 0.06})`,
-                        transition: 'transform 320ms ease-out',
-                      }}
-                    />
-                  )}
-
-                  <div className="relative z-40 w-full max-w-5xl px-4">
-                    <div className="mejin-loading-shell rounded-[2rem] p-4 sm:p-6 md:p-7">
-                      {activeTab === 'image' && loadingImageCards.length > 0 ? (
-                        <>
-                          <div className={`grid ${loadingOutputCount <= 2 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1 sm:grid-cols-2'} gap-3 sm:gap-4`}>
-                            {loadingImageCards.map((card) => (
-                              <article
-                                key={card.id}
-                                className={`relative overflow-hidden rounded-2xl border min-h-44 sm:min-h-52 ${card.done ? 'border-blue-300' : 'border-slate-200'}`}
-                              >
-                                {card.imageUrl ? (
-                                  <img
-                                    src={card.imageUrl}
-                                    alt={`Generating image ${card.index + 1}`}
-                                    className={`absolute inset-0 w-full h-full object-cover transition-all duration-700 ${card.done ? 'blur-none scale-100 saturate-100 opacity-100 cursor-pointer z-50' : 'blur-[8px] scale-110 saturate-[0.85] mejin-loading-drift opacity-60'}`}
-                                    style={{ animationDelay: `${card.index * 280}ms` }}
-                                    onClick={() => card.done && setEnlargedImage(card.imageUrl)}
-                                  />
-                                ) : (
-                                  <div className="absolute inset-0 bg-blue-50/50" />
-                                )}
-                                <div className={`absolute inset-0 bg-gradient-to-t from-white/90 via-white/50 to-transparent ${card.done ? 'opacity-0' : 'opacity-100'}`} />
-                                <div className={`absolute inset-0 blend-sweep pointer-events-none opacity-40 ${card.done ? 'hidden' : 'block'}`} />
-
-                                <div className="absolute left-3 right-3 bottom-3 rounded-xl px-3 py-2.5 shadow-sm transition-all" style={{background:'rgba(6,8,17,0.75)',border:'1px solid rgba(255,255,255,0.08)',backdropFilter:'blur(12px)'}}>
-                                  <div className="flex items-center justify-between text-[11px] sm:text-xs font-bold tracking-wide" style={{color:'var(--text-soft)'}}>
-                                    <span>Image {card.index + 1}</span>
-                                    <span style={{color: card.done ? 'var(--accent)' : 'var(--text-muted)'}}>{card.done ? 'Completed' : 'Processing'}</span>
-                                  </div>
-                                  <p className="mt-1 text-sm sm:text-base font-black tracking-tight" style={{color:'var(--text)'}}>
-                                    {formatElapsedClock(card.seconds)} {card.done ? 'to generate' : 'elapsed'}
-                                  </p>
-                                </div>
-                              </article>
-                            ))}
+                {/* Shimmer grid */}
+                {activeTab === 'image' && (
+                  <div className={`grid gap-2 ${numOutputs <= 2 ? 'grid-cols-2' : 'grid-cols-2'}`}>
+                    {loadingImageCards.map((card) => (
+                      <div
+                        key={card.id}
+                        className="relative overflow-hidden rounded-2xl"
+                        style={{ aspectRatio: '3/4', background: 'var(--bg-surface)' }}
+                      >
+                        {card.imageUrl ? (
+                          <img
+                            src={card.imageUrl}
+                            alt={`Generating ${card.index + 1}`}
+                            className={`absolute inset-0 w-full h-full object-cover transition-all duration-700 ${card.done ? 'blur-none opacity-100' : 'blur-sm opacity-50'}`}
+                          />
+                        ) : (
+                          <div className="absolute inset-0 shimmer-card" />
+                        )}
+                        {card.done && (
+                          <div className="absolute bottom-2 left-2 right-2 flex items-center justify-center">
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background: 'rgba(37,99,235,0.85)', color: '#fff' }}>
+                              Done
+                            </span>
                           </div>
+                        )}
+                      </div>
+                    ))}
+                    {/* Fill empty slots if no cards yet */}
+                    {loadingImageCards.length === 0 && Array.from({ length: numOutputs }).map((_, i) => (
+                      <div
+                        key={i}
+                        className="relative overflow-hidden rounded-2xl shimmer-card"
+                        style={{ aspectRatio: '3/4' }}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
-                          <div className="mt-4 sm:mt-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                            <div className="flex items-center gap-3">
-                              <div className="px-3 py-1.5 rounded-full text-sm font-black tracking-wider flex items-center gap-1.5" style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'var(--text)'}}>
-                                <Clock3 className="w-4 h-4" style={{color:'var(--accent)'}} />
-                                {formatElapsedClock(elapsedSeconds)}
-                              </div>
-                              <p className="text-[11px] sm:text-sm font-bold uppercase tracking-[0.12em]" style={{color:'var(--text-soft)'}}>
-                                {taskState || 'Running image synthesis...'}
-                              </p>
-                            </div>
-                            <button
-                              onClick={() => {
-                                generationControllerRef.current?.abort();
-                                setTaskState('Cancelling generation...');
-                              }}
-                              className="mejin-btn-danger px-5 py-2.5 rounded-full text-xs font-bold uppercase tracking-wider transition-colors"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </>
-                      ) : (
-                        <div className="py-8 sm:py-10 flex flex-col items-center gap-4">
-                          <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
-                          <div className="text-slate-800 text-4xl font-black tracking-tight">
-                            {formatElapsedClock(elapsedSeconds)}
-                          </div>
-                          <p className="text-xs sm:text-sm uppercase tracking-[0.16em] font-semibold text-slate-600 text-center">
-                            {taskState || 'Processing...'}
-                          </p>
-                          <button
-                            onClick={() => {
-                              generationControllerRef.current?.abort();
-                              setTaskState('Cancelling generation...');
-                            }}
-                            className="mejin-btn-danger px-5 py-2.5 rounded-full text-xs font-bold uppercase tracking-wider transition-colors"
-                          >
-                            Cancel
-                          </button>
+
+            {/* ── RESULT STATE: flat card grid ── */}
+            {currentResultValid && !isGenerating && (
+              <div className="gen-panel p-4 flex flex-col gap-3">
+                {/* Top bar — results label only */}
+                <div className="flex items-center justify-end">
+                  <span className="text-xs font-semibold" style={{ color: 'var(--text-muted)' }}>Results</span>
+                </div>
+
+                {/* Image mode results */}
+                {activeTab === 'image' && resultImages && (
+                  selectedResult !== null ? (
+                    /* Single expanded view */
+                    <div className="flex flex-col gap-3">
+                      <img
+                        src={getResultImageUrl(selectedResultItem)}
+                        alt="Selected Result"
+                        className="w-full rounded-2xl object-cover shadow-xl"
+                        style={{ maxHeight: '60vh', objectFit: 'contain' }}
+                      />
+                      {getResultImagePrompt(selectedResultItem) && (
+                        <div className="rounded-xl p-3" style={{background:'rgba(255,255,255,0.03)',border:'1px solid var(--border)'}}>
+                          <p className="text-[10px] font-bold uppercase tracking-wider mb-1" style={{color:'var(--text-muted)'}}>Prompt Used</p>
+                          <p className="text-xs leading-relaxed" style={{color:'var(--text-secondary)'}}>{getResultImagePrompt(selectedResultItem)}</p>
                         </div>
                       )}
+                      <div className="flex flex-wrap gap-2">
+                        <button onClick={() => setSelectedResult(null)} className="text-xs font-bold px-3 py-1.5 rounded-full" style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}>← All</button>
+                        <button onClick={() => handleEnhanceTo4K(getResultImageUrl(selectedResultItem))} className="mejin-btn-primary px-4 py-1.5 rounded-full text-xs font-bold flex items-center gap-1"><Sparkles className="w-3 h-3" />Enhance 4K</button>
+                        <a href={getResultImageUrl(selectedResultItem)} target="_blank" rel="noreferrer" className="btn-ghost px-4 py-1.5 rounded-full text-xs font-bold flex items-center gap-1"><Download className="w-3 h-3" />Save</a>
+                        <button onClick={handleRerollFromPreferred} className="btn-ghost px-4 py-1.5 rounded-full text-xs font-bold flex items-center gap-1"><Wand2 className="w-3 h-3" />Reroll</button>
+                        <button onClick={() => handleImportSelectedResultToVeo(selectedResultItem)} className="btn-ghost px-4 py-1.5 rounded-full text-xs font-bold flex items-center gap-1"><Video className="w-3 h-3" />To Veo</button>
+                      </div>
                     </div>
-                  </div>
-                </div>
-              )}
-
-              {currentResultValid && !isGenerating && (
-                <div className="absolute inset-0 p-3 sm:p-4 transition-all duration-500 flex flex-col">
-                  <div className="absolute top-3 sm:top-6 left-3 sm:left-6 right-3 sm:right-6 z-40 flex justify-between items-start pointer-events-none flex-col sm:flex-row gap-2 sm:gap-0">
-                    <button
-                      onClick={() => {
-                        setResultImages(null);
-                        setSelectedResult(null);
-                        setPreferredResultIndex(null);
-                        setVideoResultUrl(null);
-                        setMobileView('controls');
-                      }}
-                      className="pointer-events-auto px-5 py-2.5 rounded-full text-sm font-bold backdrop-blur-md shadow-lg transition-all hover:scale-105" style={{background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.12)',color:'var(--text)'}}
-                    >
-                      {'←'} Go Back
-                    </button>
-                    <div className="pointer-events-auto backdrop-blur-md rounded-full px-4 py-2 flex items-center gap-2 text-xs font-bold shadow-lg max-w-full sm:max-w-md" style={{background:'rgba(79,139,255,0.1)',border:'1px solid rgba(79,139,255,0.25)',color:'#93c5fd'}}>
-                      <AlertCircle className="w-4 h-4 shrink-0" style={{color:'#60a5fa'}} />
-                      Save results before leaving! Changes will be lost.
-                    </div>
-                  </div>
-                  <div className="flex-1 w-full h-full relative flex items-center justify-center p-4">
-                    {activeTab === 'image' && resultImages && (
-                      selectedResult !== null ? (
-                        <div className="w-full h-full relative group">
-                          <button
-                            onClick={() => setSelectedResult(null)}
-                            className="absolute top-6 right-6 z-40 mejin-btn-danger px-5 py-2.5 rounded-full text-sm font-bold backdrop-blur-md shadow-lg transition-all"
-                          >
-                            <X className="w-4 h-4 inline-block mr-1" /> Close
-                          </button>
-                          {selectedResultItem && preferredResultIndex === selectedResult && (
-                            <div className="absolute top-6 left-6 z-40 rounded-full px-4 py-2 text-xs font-black uppercase tracking-wider shadow-lg" style={{background:'linear-gradient(135deg,var(--accent),var(--accent-2))',color:'#fff'}}>
-                              Selected
-                            </div>
-                          )}
-                          <div className="w-full h-full bg-slate-50 rounded-[2rem] border border-slate-200 overflow-hidden shadow-inner p-2 flex items-center justify-center">
-                            <img
-                              src={getResultImageUrl(selectedResultItem)}
-                              alt="Selected Result"
-                              className="max-w-full max-h-full object-contain rounded-2xl shadow-xl transition-all duration-500"
-                            />
-                          </div>
-                          {Number.isFinite(getResultImageCost(selectedResultItem)) && (
-                            <p className="mt-3 text-center text-sm font-bold text-sky-600">
-                              {getTokenCostLabel(getResultImageCost(selectedResultItem), selectedResultItem?.tokenMode || 'estimated')}
-                            </p>
-                          )}
-                          {Number.isFinite(getResultImageGenerationSeconds(selectedResultItem)) && (
-                            <p className="mt-2 text-center text-xs font-bold uppercase tracking-wider text-blue-300">
-                              Generated in {getResultImageGenerationSeconds(selectedResultItem)}s
-                            </p>
-                          )}
-                          {getResultImagePrompt(selectedResultItem) && (
-                            <div className="mt-3 mx-auto max-w-4xl rounded-xl p-3" style={{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)'}}>
-                              <p className="text-[11px] font-bold uppercase tracking-wider mb-2" style={{color:'var(--text-muted)'}}>Prompt Used</p>
-                              <pre className="text-xs leading-relaxed font-mono whitespace-pre-wrap break-words" style={{color:'var(--text-soft)'}}>
-                                {getResultImagePrompt(selectedResultItem)}
-                              </pre>
-                            </div>
-                          )}
-                          <div className="absolute bottom-4 sm:bottom-10 left-0 right-0 flex flex-wrap justify-center gap-3 sm:gap-4 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-300 px-3 sm:px-4">
-                            <button
-                              onClick={() => handleEnhanceTo4K(getResultImageUrl(selectedResultItem))}
-                              className="mejin-btn-primary px-6 py-3 rounded-full font-bold flex items-center gap-2"
+                  ) : (
+                    /* Grid view */
+                    <div className="flex flex-col gap-3">
+                      <div className="grid grid-cols-2 gap-2">
+                        {resultImages.map((resultItem, idx) => {
+                          const resultCost = getResultImageCost(resultItem);
+                          const secs = getResultImageGenerationSeconds(resultItem);
+                          return (
+                            <div
+                              key={idx}
+                              className={`relative overflow-hidden rounded-2xl cursor-pointer border-2 transition-all ${selectedResultIndices.has(idx) ? 'border-blue-500' : 'border-transparent'}`}
+                              style={{ aspectRatio: '3/4', background: 'var(--bg-surface)' }}
+                              onClick={() => {
+                                const next = new Set(selectedResultIndices);
+                                if (next.has(idx)) next.delete(idx); else next.add(idx);
+                                setSelectedResultIndices(next);
+                                setPreferredResultIndex(next.size > 0 ? [...next][next.size - 1] : null);
+                              }}
                             >
-                              <Sparkles className="w-4 h-4" />
-                              Enhance 4K
-                            </button>
-
-                            <a
-                              href={getResultImageUrl(selectedResultItem)}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="btn-ghost px-6 py-3 rounded-full font-bold flex items-center gap-2"
-                            >
-                              <Download className="w-4 h-4" />
-                              Save
-                            </a>
-
-                            <button
-                              onClick={handleRerollFromPreferred}
-                              className="btn-ghost px-6 py-3 rounded-full font-bold flex items-center gap-2"
-                            >
-                              <Wand2 className="w-4 h-4" />
-                              Reroll
-                            </button>
-
-                            <button
-                              onClick={() => handleImportSelectedResultToVeo(selectedResultItem)}
-                              className="btn-ghost px-6 py-3 rounded-full font-bold flex items-center gap-2"
-                            >
-                              <Video className="w-4 h-4" />
-                              To Veo
-                            </button>
-
-                            <button
-                              onClick={() => handleRegenerateFromVariant(getResultImageUrl(selectedResultItem))}
-                              className="btn-ghost px-6 py-3 rounded-full font-bold flex items-center gap-2"
-                            >
-                              <LayoutTemplate className="w-4 h-4" />
-                              Use as Base
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="w-full h-full flex flex-col pt-14 sm:pt-16" style={{minHeight:0}}>
-                          <h2 className="text-lg sm:text-xl font-black mb-2 sm:mb-3 text-center tracking-tight shrink-0" style={{color:'var(--text)'}}>Select result(s)</h2>
-                          <div className={`grid grid-cols-2 gap-2 sm:gap-3 w-full px-1 sm:px-3 overflow-hidden`} style={{flex:'1 1 0',minHeight:0}}>
-                            {resultImages.map((resultItem, idx) => {
-                              const resultCost = getResultImageCost(resultItem);
-                              const resultPrompt = getResultImagePrompt(resultItem);
-                              const isPreferred = preferredResultIndex === idx;
-
-                              return (
-                                <div
-                                  key={idx}
-                                  className={`result-card rounded-2xl border-2 cursor-pointer ${
-                                    selectedResultIndices.has(idx)
-                                      ? 'border-blue-500 shadow-[0_0_16px_rgba(79,139,255,0.45)]'
-                                      : 'border-transparent'
-                                  } bg-black/30`}
-                                  style={{aspectRatio:'3/4',minHeight:0}}
-                                  onClick={() => {
-                                    const next = new Set(selectedResultIndices);
-                                    if (next.has(idx)) next.delete(idx); else next.add(idx);
-                                    setSelectedResultIndices(next);
-                                    setPreferredResultIndex(next.size > 0 ? [...next][next.size-1] : null);
-                                  }}
-                                >
-                                  {/* Checkbox indicator */}
-                                  <div className={`img-checkbox ${selectedResultIndices.has(idx) ? 'checked' : ''}`}>
-                                    {selectedResultIndices.has(idx) && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
-                                  </div>
-                                  <img
-                                    src={getResultImageUrl(resultItem)}
-                                    alt={`Result Variant ${idx + 1}`}
-                                    className="absolute inset-0 w-full h-full object-cover rounded-2xl transition-transform duration-500 group-hover/item:scale-105"
-                                  />
-                                  {/* Tap to view full */}
-                                  <button
-                                    type="button"
-                                    className="absolute bottom-2 right-2 z-10 text-[10px] font-bold px-2 py-1 rounded-full backdrop-blur-md"
-                                    style={{background:'rgba(0,0,0,0.55)',color:'rgba(255,255,255,0.85)',border:'1px solid rgba(255,255,255,0.12)'}}
-                                    onClick={(e) => { e.stopPropagation(); setSelectedResult(idx); }}
-                                  >
-                                    View
-                                  </button>
-                                  {(Number.isFinite(resultCost) || Number.isFinite(getResultImageGenerationSeconds(resultItem))) && (
-                                    <div className="absolute bottom-2 left-2 rounded-lg px-2 py-1 flex flex-col items-start gap-0 pointer-events-none z-10" style={{background:'rgba(0,0,0,0.55)',backdropFilter:'blur(6px)'}}>
-                                      {Number.isFinite(resultCost) && (
-                                        <span className="text-[9px] font-bold text-white tracking-wide">
-                                          {getTokenCostLabel(resultCost, resultItem?.tokenMode || 'estimated')}
-                                        </span>
-                                      )}
-                                      {Number.isFinite(getResultImageGenerationSeconds(resultItem)) && (
-                                        <span className="text-[9px] font-semibold text-white/75 uppercase tracking-widest">
-                                          {getResultImageGenerationSeconds(resultItem)}s
-                                        </span>
-                                      )}
-                                    </div>
-                                  )}
+                              <img src={getResultImageUrl(resultItem)} alt={`Variant ${idx + 1}`} className="absolute inset-0 w-full h-full object-cover" />
+                              {selectedResultIndices.has(idx) && (
+                                <div className="absolute inset-0 flex items-center justify-center" style={{background:'rgba(37,99,235,0.15)'}}>
+                                  <Check className="w-6 h-6 text-white" strokeWidth={3} />
                                 </div>
-                              );
-                            })}
-                          </div>
-                          <div className="mt-2 flex justify-center">
-                            <p className="text-xs font-semibold rounded-full px-4 py-2" style={{background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.08)',color:'var(--text-soft)'}}>
-                              {selectedResultIndices.size > 0
-                                ? `${selectedResultIndices.size} image${selectedResultIndices.size > 1 ? 's' : ''} selected`
-                                : 'Tap images to select. Tap View to inspect.'}
-                            </p>
-                          </div>
-                          <div className="flex flex-col sm:flex-row flex-wrap justify-center items-center gap-2 mt-3 mb-4 w-full max-w-2xl px-4 mx-auto">
-                            <button
-                              onClick={handleRerollFromPreferred}
-                              disabled={selectedResultIndices.size === 0}
-                              className="mejin-btn-primary w-full sm:w-auto flex-1 disabled:opacity-40 disabled:cursor-not-allowed px-6 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all active:scale-95 text-sm"
-                            >
-                              <Wand2 className="w-4 h-4 shrink-0" />
-                              <span className="truncate">Reroll</span>
-                            </button>
-                            <button
-                              onClick={handleImportPreferredToVeo}
-                              disabled={selectedResultIndices.size === 0}
-                              className="btn-ghost w-full sm:w-auto flex-1 disabled:opacity-40 disabled:cursor-not-allowed px-6 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all active:scale-95 text-sm"
-                            >
-                              <Video className="w-5 h-5 shrink-0" style={{color:'var(--accent)'}} />
-                              <span className="truncate">To Veo 3.1</span>
-                            </button>
-                            <button
-                              onClick={handleGenerate}
-                              className="btn-ghost w-full sm:w-auto flex-1 px-6 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all active:scale-95 text-sm"
-                            >
-                              <Sparkles className="w-4 h-4 shrink-0" style={{color:'var(--accent)'}} />
-                              <span className="truncate">Fresh Generate</span>
-                            </button>
-                          </div>
-                        </div>
-                      )
-                    )}
-
-                    {activeTab === 'video' && videoResultUrl && (
-                      <div className="w-full h-full relative group flex items-center justify-center p-4">
-                        <div className="w-full max-w-4xl max-h-full bg-slate-50 rounded-[2.5rem] p-3 border border-slate-200 shadow-2xl">
-                          <video
-                            src={videoResultUrl}
-                            controls
-                            autoPlay
-                            loop
-                            muted
-                            className="w-full h-full object-contain rounded-[2rem]"
-                          />
-                        </div>
-                        <div className="absolute bottom-4 sm:bottom-10 left-0 right-0 flex justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-300 px-4">
-                          <a
-                            href={videoResultUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="bg-white/90 hover:bg-white text-slate-800 backdrop-blur-md border border-slate-200 px-8 py-4 rounded-full font-black flex items-center gap-2 shadow-xl transition-all hover:scale-105"
-                          >
-                            <Download className="w-5 h-5" />
-                          </a>
-                        </div>
+                              )}
+                              <button
+                                onMouseDown={(e) => e.stopPropagation()}
+                                onClick={(e) => { e.stopPropagation(); setSelectedResult(idx); }}
+                                className="absolute bottom-2 right-2 text-[10px] font-bold px-2 py-0.5 rounded-full"
+                                style={{background:'rgba(0,0,0,0.6)',color:'rgba(255,255,255,0.9)',border:'1px solid rgba(255,255,255,0.12)'}}
+                              >View</button>
+                              {(Number.isFinite(resultCost) || Number.isFinite(secs)) && (
+                                <div className="absolute bottom-2 left-2 rounded-lg px-2 py-0.5" style={{background:'rgba(0,0,0,0.6)'}}>
+                                  {Number.isFinite(secs) && <span className="text-[9px] font-semibold text-white/75">{secs}s</span>}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-          {/* Prompt & Config Card */}
-          <div className="mejin-panel p-5 flex flex-col gap-4">
-              {/* Generation Output Configuration - Conditional on Tab */}
-              {activeTab === 'image' ? (
-                    <>
-                      {/* Prompt */}
-                      <div className="space-y-2 pt-2 text-left">
-                        <span className="section-label">Prompt</span>
-                        <textarea
-                          value={prompt}
-                          onChange={(e) => setPrompt(e.target.value)}
-                          rows={2}
-                          placeholder="Describe the scene for your image..."
-                          className="mejin-textarea w-full px-4 py-3"
-                        />
-                      </div>
-                      <div className="mejin-alert mejin-alert--info" style={{justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:'8px'}}>
-                        <div className="flex items-center gap-2">
-                          <Sparkles className="w-4 h-4" style={{color:'var(--primary)'}} />
-                          <span className="text-sm font-bold" style={{color:'var(--text)'}}>GPT-5.2 Image Analysis</span>
-                        </div>
+                      <p className="text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+                        {selectedResultIndices.size > 0 ? `${selectedResultIndices.size} selected` : 'Tap to select · View to expand'}
+                      </p>
+                      <div className="flex flex-wrap gap-2 justify-center">
                         <button
-                          onClick={handleAnalyzePrompt}
-                          disabled={isAnalyzingSuggestions || images.length === 0}
-                          className="mejin-btn-secondary text-xs px-4 py-2 rounded-full disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                          onClick={() => {
+                            if (selectedResultIndices.size === 0) return;
+                            // Use only the selected result images as source for the next generation
+                            const selectedUrls = [...selectedResultIndices]
+                              .map((idx) => getResultImageUrl(resultImages[idx]))
+                              .filter(Boolean);
+                            const nextImages = selectedUrls.map((url) => ({ id: Date.now() + Math.random(), url, isLocal: false }));
+                            setImages(nextImages);
+                            setResultImages(null);
+                            setSelectedResultIndices(new Set());
+                            setPreferredResultIndex(null);
+                            setTimeout(() => handleGenerate(), 50);
+                          }}
+                          disabled={selectedResultIndices.size === 0}
+                          className="mejin-btn-primary px-5 py-2 rounded-full text-xs font-bold flex items-center gap-1.5 disabled:opacity-40"
                         >
-                          {isAnalyzingSuggestions ? (
-                            <>
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                              Analyzing...
-                            </>
-                          ) : (
-                            'Analyze with AI'
-                          )}
+                          <Wand2 className="w-3.5 h-3.5" />Reroll
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (selectedResultIndices.size === 0) return;
+                            const selectedUrls = [...selectedResultIndices]
+                              .map((idx) => getResultImageUrl(resultImages[idx]))
+                              .filter(Boolean);
+                            importImagesToVeoMode(selectedUrls, 'Selected results imported to Veo.');
+                          }}
+                          disabled={selectedResultIndices.size === 0}
+                          className="btn-ghost px-5 py-2 rounded-full text-xs font-bold flex items-center gap-1.5 disabled:opacity-40"
+                        >
+                          <Video className="w-3.5 h-3.5" />To Veo
                         </button>
                       </div>
+                    </div>
+                  )
+                )}
 
-                      {/* Number of Outputs */}
-                      <div className="space-y-3 pt-4" style={{borderTop:'1px solid var(--border)'}}>
-                        <div className="flex justify-between items-center">
-                          <span className="section-label">Output Variations</span>
-                          <div className="flex rounded-full p-1" style={{background:'var(--bg-base)',border:'1px solid var(--border)'}}>
-                            <button
-                              onClick={() => setNumOutputs(2)}
-                              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${numOutputs === 2 ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
-                            >
-                              2 Layouts
-                            </button>
-                            <button
-                              onClick={() => setNumOutputs(4)}
-                              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${numOutputs === 4 ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
-                            >
-                              4 Layouts
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Resolution & Aspect Ratio */}
-                      <div className="grid grid-cols-2 gap-4 pt-4" style={{borderTop:'1px solid var(--border)'}}>
-                        <div className="space-y-2">
-                          <span className="section-label">Resolution</span>
-                          <div className="grid grid-cols-3 gap-1.5">
-                            {['1K', '2K', '4K'].map((res) => (
-                              <button
-                                key={res}
-                                onClick={() => setResolution(res)}
-                                className={`py-2 rounded-xl text-xs font-bold transition-all ${resolution === res ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
-                              >
-                                {res}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="space-y-2">
-                          <span className="section-label">Aspect Ratio</span>
-                          <div className="grid grid-cols-3 gap-1.5">
-                            {['auto', '1:1', '4:3', '3:4', '16:9', '9:16'].map((ratio) => (
-                              <button
-                                key={ratio}
-                                onClick={() => setAspectRatio(ratio)}
-                                className={`py-2 rounded-xl text-xs font-bold transition-all ${aspectRatio === ratio ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
-                              >
-                                {ratio}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-
-                    </>
-                  ) : (
-                    <>
-                      {/* Type */}
-                      <div className="space-y-2 pt-2">
-                        <span className="section-label">Generation Type</span>
-                        <div className="grid grid-cols-3 gap-2">
-                          <button
-                            onClick={() => { setVideoGenerationType('text2vid'); }}
-                            className={`py-3 rounded-xl text-xs font-bold transition-all ${videoGenerationType === 'text2vid' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
-                          >
-                            Text to Video
-                          </button>
-                          <button
-                            onClick={() => { setVideoGenerationType('img2vid'); setVideoModel('veo3'); }}
-                            className={`py-3 rounded-xl text-xs font-bold transition-all ${videoGenerationType === 'img2vid' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
-                          >
-                            Frames to Video
-                          </button>
-                          <button
-                            onClick={() => { setVideoGenerationType('ref2vid'); setVideoModel('veo3_fast'); }}
-                            className={`py-3 rounded-xl text-xs font-bold transition-all ${videoGenerationType === 'ref2vid' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
-                          >
-                            Reference to Video
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Prompt */}
-                      <div className="space-y-2 mt-3">
-                        <span className="section-label">Video Scene Prompt</span>
-                        <textarea
-                          value={videoPrompt}
-                          onChange={(e) => setVideoPrompt(e.target.value)}
-                          rows={3}
-                          placeholder="Describe the motion, action, and scene..."
-                          className="mejin-textarea w-full px-4 py-3"
-                        />
-                      </div>
-
-                      {/* Model & Aspect Ratio */}
-                      <div className="grid grid-cols-2 gap-4 pt-2">
-                        <div className="space-y-2">
-                          <span className="section-label">Veo Model</span>
-                          <div className="grid grid-cols-2 gap-2">
-                            <button
-                              onClick={() => setVideoModel('veo3')}
-                              disabled={videoGenerationType === 'ref2vid'}
-                              className={`py-2 rounded-xl text-xs font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed ${videoModel === 'veo3' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
-                            >
-                              Veo 3
-                            </button>
-                            <button
-                              onClick={() => setVideoModel('veo3_fast')}
-                              className={`py-2 rounded-xl text-xs font-bold transition-all ${videoModel === 'veo3_fast' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
-                            >
-                              Veo 3 Fast
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="space-y-2">
-                          <span className="section-label">Format</span>
-                          <div className="grid grid-cols-2 gap-2">
-                            {VIDEO_ASPECT_RATIOS.map((ratio) => (
-                              <button
-                                key={ratio}
-                                onClick={() => setVideoAspectRatio(ratio)}
-                                className={`py-2 rounded-xl text-xs font-bold transition-all ${videoAspectRatio === ratio ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
-                              >
-                                {ratio}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-
-                    </>
-                  )}
-
-
-          </div>{/* end config card */}
-
-          {/* Generate Button */}
-          <div className="w-full">
-            <button
-              onClick={activeTab === 'image' ? handleGenerate : handleVideoGenerate}
-              disabled={isGenerating || (activeTab === 'video' && videoGenerationType !== 'text2vid' && images.length === 0) || (activeTab === 'image' && images.length === 0)}
-              className="mejin-btn-primary w-full rounded-2xl py-4 px-6 flex flex-col items-center justify-center glow-pulse"
-              style={{minHeight:'60px'}}
-            >
-              {isGenerating ? (
-                <div className="flex items-center gap-2">
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  <span className="font-bold">Generating...</span>
-                </div>
-              ) : (
-                <>
-                  <span className="text-lg font-black tracking-tight">{activeTab === 'image' ? '✦ Imagine Now' : '✦ Animate Now'}</span>
-                  <span className="text-xs mt-0.5" style={{color:'rgba(255,255,255,0.65)'}}>Powered by AI</span>
-                </>
-              )}
-            </button>
+                {/* Video mode result */}
+                {activeTab === 'video' && videoResultUrl && (
+                  <div className="flex flex-col gap-3">
+                    <video src={videoResultUrl} controls autoPlay loop muted className="w-full rounded-2xl" />
+                    <div className="flex justify-center">
+                      <a href={videoResultUrl} target="_blank" rel="noreferrer" className="btn-ghost px-6 py-2 rounded-full text-xs font-bold flex items-center gap-2"><Download className="w-4 h-4" />Save</a>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
+        )}
 
-          {/* Error */}
-          {error && (
-            <div className="mejin-alert mejin-alert--error">
-              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-              <p>{error}</p>
+
+
+          {/* VIDEO MODE: Prompt + Config — in its own panel */}
+          {activeTab === 'video' && (
+            <div className="gen-panel p-5 flex flex-col gap-4">
+              {/* Type */}
+              <div className="space-y-2">
+                <span className="section-label">Generation Type</span>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    onClick={() => { setVideoGenerationType('text2vid'); }}
+                    className={`py-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center ${videoGenerationType === 'text2vid' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
+                  >
+                    Text to Video
+                  </button>
+                  <button
+                    onClick={() => { setVideoGenerationType('img2vid'); setVideoModel('veo3'); }}
+                    className={`py-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center ${videoGenerationType === 'img2vid' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
+                  >
+                    Frames to Video
+                  </button>
+                  <button
+                    onClick={() => { setVideoGenerationType('ref2vid'); setVideoModel('veo3_fast'); }}
+                    className={`py-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center ${videoGenerationType === 'ref2vid' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
+                  >
+                    Ref to Video
+                  </button>
+                </div>
+              </div>
+
+              {/* Video Prompt */}
+              <div className="space-y-2">
+                <span className="section-label">Scene Prompt</span>
+                <textarea
+                  value={videoPrompt}
+                  onChange={(e) => setVideoPrompt(e.target.value)}
+                  rows={3}
+                  placeholder="Describe the motion, action, and scene..."
+                  className="mejin-textarea w-full px-4 py-3"
+                />
+                {/* Proceed video */}
+                <div className="flex justify-end mt-2">
+                  <button
+                    onClick={handleVideoGenerate}
+                    disabled={isGenerating || (videoGenerationType !== 'text2vid' && images.length === 0)}
+                    className="prompt-proceed-btn"
+                  >
+                    {isGenerating ? (
+                      <><Loader2 className="w-4 h-4 animate-spin" />Generating...</>
+                    ) : (
+                      <><Video className="w-4 h-4" />Proceed</>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Model & Aspect Ratio */}
+              <div className="grid grid-cols-2 gap-4 pt-2" style={{ borderTop: '1px solid var(--border)' }}>
+                <div className="space-y-2">
+                  <span className="section-label">Veo Model</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setVideoModel('veo3')}
+                      disabled={videoGenerationType === 'ref2vid'}
+                      className={`py-2 rounded-xl text-xs font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center ${videoModel === 'veo3' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
+                    >
+                      Veo 3
+                    </button>
+                    <button
+                      onClick={() => setVideoModel('veo3_fast')}
+                      className={`py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center ${videoModel === 'veo3_fast' ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
+                    >
+                      Veo 3 Fast
+                    </button>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <span className="section-label">Format</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    {VIDEO_ASPECT_RATIOS.map((ratio) => (
+                      <button
+                        key={ratio}
+                        onClick={() => setVideoAspectRatio(ratio)}
+                        className={`py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center ${videoAspectRatio === ratio ? 'mejin-chip mejin-chip--active' : 'mejin-chip'}`}
+                      >
+                        {ratio}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
-          {/* Task state */}
-          {taskState && !error && (
-            <p className="text-xs font-bold text-center animate-pulse" style={{color:'var(--primary)'}}>{taskState}</p>
+          {/* IMAGE MODE: Prompt Panel — comes right after upload */}
+          {activeTab === 'image' && (
+            <div className="gen-panel p-5 flex flex-col gap-4">
+              {/* Prompt textarea */}
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                rows={3}
+                placeholder="Greetings! What's your imagination today? ✨"
+                className="mejin-textarea w-full px-4 py-3"
+                style={{ fontSize: '0.9375rem' }}
+              />
+              {/* GPT row + Proceed */}
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4" style={{ color: 'var(--primary)' }} />
+                  <span className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>GPT-5.2 Image Analysis</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleAnalyzePrompt}
+                    disabled={isAnalyzingSuggestions || images.length === 0}
+                    className="mejin-btn-secondary text-xs px-4 py-2 rounded-full disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  >
+                    {isAnalyzingSuggestions ? (
+                      <><Loader2 className="w-3.5 h-3.5 animate-spin" />Analyzing...</>
+                    ) : 'Analyze'}
+                  </button>
+                  <button
+                    onClick={handleGenerate}
+                    disabled={isGenerating || images.length === 0}
+                    className="prompt-proceed-btn"
+                  >
+                    {isGenerating ? (
+                      <><Loader2 className="w-4 h-4 animate-spin" />Generating...</>
+                    ) : (
+                      <><Sparkles className="w-4 h-4" />Proceed</>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
-        </div>
+
+          {/* IMAGE MODE: Compact Settings Row — Variations | Resolution | Aspect Ratio */}
+          {activeTab === 'image' && (
+            <div className="gen-controls-panel">
+
+              {/* Column 1: Output Variations */}
+              <div className="gen-controls-col">
+                <label className="controls-col-label" htmlFor="ctrl-variations">Output Variations</label>
+                <select
+                  id="ctrl-variations"
+                  value={numOutputs}
+                  onChange={(e) => setNumOutputs(Number(e.target.value))}
+                  className="controls-select"
+                >
+                  <option value={2}>2 Variations</option>
+                  <option value={4}>4 Variations</option>
+                </select>
+              </div>
+
+              {/* Column 2: Resolution */}
+              <div className="gen-controls-col">
+                <label className="controls-col-label" htmlFor="ctrl-resolution">Resolution</label>
+                <select
+                  id="ctrl-resolution"
+                  value={resolution}
+                  onChange={(e) => setResolution(e.target.value)}
+                  className="controls-select"
+                >
+                  <option value="1K">1K</option>
+                  <option value="2K">2K</option>
+                  <option value="4K">4K</option>
+                </select>
+              </div>
+
+              {/* Column 3: Aspect Ratio */}
+              <div className="gen-controls-col">
+                <label className="controls-col-label" htmlFor="ctrl-ratio">Aspect Ratio</label>
+                <select
+                  id="ctrl-ratio"
+                  value={aspectRatio}
+                  onChange={(e) => setAspectRatio(e.target.value)}
+                  className="controls-select"
+                >
+                  <option value="auto">Auto</option>
+                  <option value="1:1">1:1</option>
+                  <option value="4:3">4:3</option>
+                  <option value="3:4">3:4</option>
+                  <option value="16:9">16:9</option>
+                  <option value="9:16">9:16</option>
+                </select>
+              </div>
+
+          </div>
         )}
 
+
+          </div>
+        )}
+
+
+
+
+        {/* Error */}
+        {error && mainTab === 'home' && (
+          <div className="mejin-alert mejin-alert--error">
+            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+            <p>{error}</p>
+          </div>
+        )}
+        {/* Task state */}
+        {taskState && !error && mainTab === 'home' && (
+          <p className="text-xs font-bold text-center animate-pulse" style={{color:'var(--primary)'}}>{taskState}</p>
+        )}
 
       {mainTab === 'history' && (
         <div className="w-full max-w-xl mx-auto flex flex-col items-center">

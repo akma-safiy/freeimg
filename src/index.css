@@ -6,11 +6,11 @@
    Based on 8pt grid system
 ════════════════════════════════════════════════════ */
 :root {
-  /* ── Backgrounds (ChatGPT dark scale) ── */
-  --bg-base:        #212121;
-  --bg-surface:     #2f2f2f;
-  --bg-elevated:    #404040;
-  --bg-overlay:     rgba(0, 0, 0, 0.70);
+  /* ── Backgrounds (Higgsfield / Runway dark scale) ── */
+  --bg-base:        #0f1115;
+  --bg-surface:     #14171c;
+  --bg-elevated:    #1b1f26;
+  --bg-overlay:     rgba(0, 0, 0, 0.80);
 
   /* ── Brand / Primary ── */
   --primary:        #2563EB;
@@ -423,6 +423,7 @@ input, textarea, select {
 .mejin-chip {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
   padding: 6px 14px;
   border-radius: var(--radius-full);
@@ -430,10 +431,12 @@ input, textarea, select {
   font-weight: 600;
   cursor: pointer;
   border: 1.5px solid var(--border);
-  background: var(--bg-surface);
+  background: var(--bg-elevated);
   color: var(--text-secondary);
   transition: all var(--t-feedback) var(--ease-out);
   will-change: transform;
+  text-align: center;
+  line-height: 1;
 }
 
 .mejin-chip:hover:not(:disabled) {
@@ -451,7 +454,7 @@ input, textarea, select {
   background: var(--primary) !important;
   color: #fff !important;
   border-color: var(--primary) !important;
-  box-shadow: 0 2px 8px var(--primary-glow);
+  box-shadow: 0 2px 12px var(--primary-glow), 0 0 0 1px rgba(59,130,246,0.3);
 }
 
 /* ════════════════════════════════════════════════ */
@@ -739,6 +742,224 @@ input, textarea, select {
 .mejin-alert--info    { background: rgba(37,99,235,0.12);  color: #93c5fd; border: 1px solid rgba(37,99,235,0.25); }
 .mejin-alert--error   { background: rgba(248,113,113,0.12); color: #fca5a5; border: 1px solid rgba(248,113,113,0.25); }
 .mejin-alert--success { background: rgba(52,211,153,0.12);  color: #6ee7b7; border: 1px solid rgba(52,211,153,0.25); }
+
+/* ════════════════════════════════════════════════ */
+/* UNIFIED GENERATION PANEL                         */
+/* ════════════════════════════════════════════════ */
+.gen-panel {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+
+/* ════════════════════════════════════════════════ */
+/* UPLOAD DROP ZONE                                 */
+/* ════════════════════════════════════════════════ */
+.upload-drop-zone {
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px 16px;
+  cursor: pointer;
+  transition:
+    border-color var(--t-feedback) var(--ease-out),
+    background var(--t-feedback) var(--ease-out);
+  text-align: center;
+}
+
+.upload-drop-zone:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.upload-drop-zone--active {
+  border-color: var(--primary) !important;
+  background: var(--primary-soft) !important;
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+/* ════════════════════════════════════════════════ */
+/* CONTROLS PANEL (below unified panel)             */
+/* ════════════════════════════════════════════════ */
+.gen-controls-panel {
+  background: rgba(20, 24, 32, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+  padding: 18px 20px;
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 0;
+  align-items: start;
+}
+
+/* Column dividers */
+.gen-controls-col {
+  padding: 0 14px;
+  position: relative;
+}
+.gen-controls-col:first-child {
+  padding-left: 0;
+}
+.gen-controls-col:last-child {
+  padding-right: 0;
+}
+.gen-controls-col + .gen-controls-col::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* Column label (OUTPUT VARIATIONS, RESOLUTION, ASPECT RATIO) */
+.controls-col-label {
+  display: block;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+/* Chip group inside a controls column */
+.controls-chip-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+/* Styled select dropdown for controls panel */
+.controls-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-family: inherit;
+  padding: 0 28px 0 12px;
+  height: 36px;
+  cursor: pointer;
+  width: 100%;
+  outline: none;
+  transition:
+    border-color var(--t-feedback) var(--ease-out),
+    background var(--t-feedback) var(--ease-out);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+.controls-select:hover {
+  border-color: var(--primary);
+  background-color: var(--bg-elevated);
+}
+
+.controls-select:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-soft);
+}
+
+.controls-select option {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+/* ── Responsive — only stack on very small phones ── */
+@media (max-width: 360px) {
+  .gen-controls-panel {
+    grid-template-columns: 1fr;
+    gap: 16px;
+    padding: 14px 16px;
+  }
+  .gen-controls-col {
+    padding: 0;
+  }
+  .gen-controls-col + .gen-controls-col::before {
+    display: none;
+  }
+  .gen-controls-col + .gen-controls-col {
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+    padding-top: 14px;
+  }
+}
+
+/* ── Shimmer loading card ── */
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+
+.shimmer-card {
+  background: linear-gradient(
+    90deg,
+    rgba(255,255,255,0.04) 25%,
+    rgba(255,255,255,0.10) 50%,
+    rgba(255,255,255,0.04) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+
+/* ════════════════════════════════════════════════ */
+/* PROCEED BUTTON (inline in prompt)                */
+/* ════════════════════════════════════════════════ */
+.prompt-proceed-btn {
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 18px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 4px 12px var(--primary-glow);
+  transition:
+    transform var(--t-tap) var(--ease-spring),
+    box-shadow var(--t-feedback) var(--ease-out),
+    background var(--t-feedback) var(--ease-out);
+  will-change: transform;
+  white-space: nowrap;
+}
+
+.prompt-proceed-btn:hover:not(:disabled) {
+  background: var(--primary-light);
+  box-shadow: 0 6px 20px var(--primary-glow);
+  transform: translateY(-1px);
+}
+
+.prompt-proceed-btn:active:not(:disabled) {
+  transform: scale(0.95);
+  box-shadow: 0 2px 6px var(--primary-glow);
+  transition: transform var(--t-tap) var(--ease-spring);
+}
+
+.prompt-proceed-btn:disabled {
+  background: var(--border) !important;
+  color: var(--text-muted) !important;
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
 
 /* ════════════════════════════════════════════════ */
 /* MODAL OVERLAY                                    */

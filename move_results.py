@@ -1,6 +1,6 @@
 import os
 
-file_path = "c:/Users/muhdk/.gemini/antigravity/scratch/ai-outfit-generator/src/App.jsx"
+file_path = "c:/Users/muhdk/.gemini/antigravity/scratch/mejin-apps/src/App.jsx"
 
 with open(file_path, "r", encoding="utf-8") as f:
     lines = f.readlines()

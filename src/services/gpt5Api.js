@@ -60,12 +60,32 @@ export const generatePromptsWithGpt52 = async (apiKey, imageUrls, options = {}) 
     image_url: { url }
   }));
 
-  const systemInstructions = `You are a professional AI fashion prompt engineer.
-Analyze the provided images to identify their core similarities (clothing style, specific outfit details, person's features, and aesthetic vibe).
-Generate a comprehensive, high-quality base text prompt that preserves these core elements but sets them in a stunning, high-end commercial or fashion editorial context.
-Provide exactly 4 distinct variation prompts that alter the pose or setting slightly while explicitly maintaining the exact outfit and core subject detail.
-You must return the result EXACTLY as a raw JSON object string with no markdown formatting or extra text.
-Format: { "basePrompt": "string", "variations": ["var1", "var2", "var3", "var4"] }`;
+  const systemInstructions = `You are an expert AI creative director and product photographer specializing in fashion and product campaigns.
+
+TASK: Analyze the reference images deeply and generate prompts that produce FRESH visuals — varied in pose and setting — while keeping the subject/product looking identical.
+
+STEP 1 — IDENTIFY & LOCK THE SUBJECT:
+Identify everything that must remain CONSISTENT across all generated images:
+- Product: exact garment/item type, fabric, pattern, color, cut, silhouette, branding, and key design details
+- Model (if present): approximate skin tone, hair color/style, body type, and overall aesthetic
+- Style: editorial style, cultural context, or any distinctive aesthetics visible in the references
+
+STEP 2 — GENERATE THE BASE PROMPT:
+Write a single detailed commercial/editorial prompt that:
+- Precisely describes the locked product and model characteristics from Step 1
+- Places them in a COMPLETELY DIFFERENT pose, camera angle, and environment from any reference
+- Sounds like a professional image generation prompt — direct, visual, specific
+- Uses strong lighting and fashion photography language
+
+STEP 3 — GENERATE 4 VARIATION PROMPTS:
+Each variation must describe the SAME product and model identity but with a uniquely different:
+- Camera angle or framing (e.g., overhead, close-up, 3/4 profile, wide shot)
+- Setting or environment (e.g., rooftop, studio, street, nature)
+- Lighting style (e.g., golden hour, soft studio, dramatic cinematic, neon)
+- Pose or stance
+
+You must return ONLY a raw JSON object — no markdown, no preamble, no extra text:
+{ "productType": "short label", "basePrompt": "string", "variations": ["var1", "var2", "var3", "var4"] }`;
 
   const payload = {
     messages: [
@@ -108,14 +128,22 @@ Format: { "basePrompt": "string", "variations": ["var1", "var2", "var3", "var4"]
     }
 
     const rawContent = data.choices[0].message.content.trim();
-    // Sometimes models wrap json in markdown block
-    const cleanedContent = rawContent.replace(/^```json\s*/i, '').replace(/\s*```$/i, '');
-    
+
+    // Robustly extract the JSON object — the model may wrap it in markdown,
+    // reasoning text, or preamble. Find the first '{' and last '}'.
+    const jsonStart = rawContent.indexOf('{');
+    const jsonEnd   = rawContent.lastIndexOf('}');
+    if (jsonStart === -1 || jsonEnd === -1 || jsonEnd <= jsonStart) {
+      console.error('GPT-5-2 raw response (no JSON found):', rawContent);
+      throw new Error('GPT-5-2 returned an invalid format that could not be parsed.');
+    }
+    const jsonSlice = rawContent.slice(jsonStart, jsonEnd + 1);
+
     let parsedResult;
     try {
-      parsedResult = JSON.parse(cleanedContent);
+      parsedResult = JSON.parse(jsonSlice);
     } catch (parseError) {
-      console.error('Failed to parse GPT-5-2 output:', cleanedContent);
+      console.error('GPT-5-2 JSON slice that failed to parse:', jsonSlice);
       throw new Error('GPT-5-2 returned an invalid format that could not be parsed.');
     }
 
@@ -123,7 +151,11 @@ Format: { "basePrompt": "string", "variations": ["var1", "var2", "var3", "var4"]
        throw new Error('GPT-5-2 JSON structure did not match expected schema.');
     }
 
-    return parsedResult;
+    return {
+      productType: parsedResult.productType || '',
+      basePrompt: parsedResult.basePrompt,
+      variations: parsedResult.variations,
+    };
 
   } catch (error) {
     if (signal?.aborted || isAbortError(error)) {
